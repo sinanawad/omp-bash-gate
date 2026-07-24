@@ -47,8 +47,8 @@ function makeHarness(opts?: {
     ) => {
       handler = h;
     },
+    registerCommand: (_name: string, _def: unknown) => {},
   } as const;
-
   ext(pi);
 
   return {

@@ -14,12 +14,50 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
  *
  * Fail-safe: if the model call fails or times out, retry once, then block.
  *
- * Configuration via environment variables:
+ * Configuration (precedence: state file > env var > default):
  *   BASH_GATE_MODEL        — model id for classification (default: anthropic/claude-haiku-4.5)
  *   BASH_GATE_TIMEOUT_MS   — API call timeout in ms (default: 5000)
  *   BASH_GATE_MAX_TOKENS   — max output tokens for classifier (default: 16)
  *   BASH_GATE_DEBUG        — set to "1" for verbose logging (default: off)
+ *
+ * State file: ~/.omp/agent/bash-gate.json
+ *   { "model": "anthropic/claude-haiku-4.5" }
+ *
+ * Slash command: /bash-gate — interactive model selection.
  */
+
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+
+const STATE_FILE = join(
+  process.env.HOME ?? "",
+  ".omp",
+  "agent",
+  "bash-gate.json",
+);
+
+type GateConfig = { model?: string };
+
+function loadConfig(): GateConfig {
+  try {
+    if (existsSync(STATE_FILE)) {
+      const raw = readFileSync(STATE_FILE, "utf-8");
+      const parsed = JSON.parse(raw) as GateConfig;
+      if (parsed && typeof parsed.model === "string") return parsed;
+    }
+  } catch {
+    // ignore — fall through to defaults
+  }
+  return {};
+}
+
+function saveConfig(cfg: GateConfig): void {
+  try {
+    writeFileSync(STATE_FILE, JSON.stringify(cfg, null, 2) + "\n");
+  } catch {
+    // best-effort
+  }
+}
 
 const ALLOW_PATTERNS: RegExp[] = [
   /^\s*(ls|cat|head|tail|wc|file|stat|du|df|which|command -v)\b/,
@@ -44,7 +82,11 @@ const BLOCK_PATTERNS: RegExp[] = [
   /\b>\s*\/dev\/sd[a-z]/,
 ];
 
-const MODEL = process.env.BASH_GATE_MODEL ?? "anthropic/claude-haiku-4.5";
+const FILE_CONFIG = loadConfig();
+const MODEL =
+  FILE_CONFIG.model ??
+  process.env.BASH_GATE_MODEL ??
+  "anthropic/claude-haiku-4.5";
 const REQUEST_TIMEOUT_MS = Number(process.env.BASH_GATE_TIMEOUT_MS ?? 5000);
 const MAX_TOKENS = Number(process.env.BASH_GATE_MAX_TOKENS ?? 16);
 const DEBUG = process.env.BASH_GATE_DEBUG === "1";
@@ -147,6 +189,26 @@ async function classifyWithModel(
   }
 }
 
+// Model options for the /bash-gate slash command.
+const MODEL_OPTIONS = [
+  {
+    label: "Claude Haiku 4.5 (recommended — non-thinking, cheap, reliable)",
+    value: "anthropic/claude-haiku-4.5",
+  },
+  {
+    label: "Kimi K2 (non-thinking, budget)",
+    value: "moonshotai/kimi-k2",
+  },
+  {
+    label: "DeepSeek V4 Pro (thinking — may truncate)",
+    value: "deepseek/deepseek-v4-pro",
+  },
+  {
+    label: "Gemini 3.5 Flash (thinking — may truncate)",
+    value: "google/gemini-3.5-flash",
+  },
+];
+
 export default function (pi: ExtensionAPI) {
   if (DEBUG) pi.logger?.info?.(`bash-gate: loaded (model=${MODEL})`);
 
@@ -161,73 +223,59 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (BLOCK_PATTERNS.some((p) => p.test(cmd))) {
-      ctx.ui?.notify?.(`⛔ BLOCKED (dangerous pattern): ${cmd.slice(0, 100)}`, "error");
+      ctx.ui?.notify?.(
+        `⛔ BLOCKED (dangerous pattern): ${cmd.slice(0, 100)}`,
+        "error",
+      );
       return { block: true, reason: "Blocked by safety hook: dangerous pattern" };
     }
 
     ctx.ui?.setStatus?.("bash-gate", `🤔 classifying: ${cmd.slice(0, 60)}`);
     const verdict = await classifyWithModel(ctx, pi.logger, cmd);
-    if (DEBUG) pi.logger?.info?.(`bash-gate: tier3 verdict="${verdict}" cmd="${cmd.slice(0, 60)}"`);
+    if (DEBUG)
+      pi.logger?.info?.(
+        `bash-gate: tier3 verdict="${verdict}" cmd="${cmd.slice(0, 60)}"`,
+      );
     ctx.ui?.setStatus?.("bash-gate", "");
 
-    ctx.ui?.notify?.(
-      verdict === "safe"
-        ? `✅ ALLOWED (safe): ${cmd.slice(0, 100)}`
-        : verdict === "dangerous"
-          ? `⛔ BLOCKED (dangerous): ${cmd.slice(0, 100)}`
-          : verdict === "risky"
-            ? `⚠️ PROMPTING (risky): ${cmd.slice(0, 100)}`
-            : `⛔ BLOCKED (check failed): ${cmd.slice(0, 100)}`,
-      verdict === "safe" ? "info" : "error",
-    );
-
-    if (verdict === null) {
+    // Resolve the final verdict — retry once if the first call fails.
+    let final = verdict;
+    if (final === null) {
       timeoutCount++;
-      if (timeoutCount <= 3) {
-        ctx.ui?.notify?.(
-          `⛔ BLOCKED (check failed): ${cmd.slice(0, 100)}`,
-          "error",
-        );
-      }
       if (timeoutCount === 3) {
         pi.logger?.warn?.(
           "bash-gate: 3 consecutive model-check failures — check OpenRouter connectivity or model availability",
         );
       }
-      const retry = await classifyWithModel(ctx, pi.logger, cmd);
-      if (retry === null) {
+      final = await classifyWithModel(ctx, pi.logger, cmd);
+      if (final === null) {
+        ctx.ui?.notify?.(
+          `⛔ BLOCKED (check failed): ${cmd.slice(0, 100)}`,
+          "error",
+        );
         return {
           block: true,
           reason: "Blocked: could not verify command safety (model check failed)",
         };
       }
-      timeoutCount = 0;
-      if (retry === "safe") return;
-      if (retry === "dangerous") {
-        return { block: true, reason: "Blocked by model: classified as dangerous" };
-      }
-      if (ctx.hasUI && ctx.ui?.confirm) {
-        const ok = await ctx.ui.confirm(
-          "⚠️ Risky bash command",
-          `Allow this command?\n\n${cmd.slice(0, 500)}`,
-        );
-        if (ok) return;
-        return { block: true, reason: "User denied risky command" };
-      }
-      return {
-        block: true,
-        reason: "Blocked: risky command in subagent (no UI to confirm)",
-      };
     }
-
     timeoutCount = 0;
 
-    if (verdict === "safe") return;
+    if (final === "safe") {
+      ctx.ui?.notify?.(`✅ ALLOWED (safe): ${cmd.slice(0, 100)}`, "info");
+      return;
+    }
 
-    if (verdict === "dangerous") {
+    if (final === "dangerous") {
+      ctx.ui?.notify?.(
+        `⛔ BLOCKED (dangerous): ${cmd.slice(0, 100)}`,
+        "error",
+      );
       return { block: true, reason: "Blocked by model: classified as dangerous" };
     }
 
+    // final === "risky"
+    ctx.ui?.notify?.(`⚠️ PROMPTING (risky): ${cmd.slice(0, 100)}`, "error");
     if (ctx.hasUI && ctx.ui?.confirm) {
       const ok = await ctx.ui.confirm(
         "⚠️ Risky bash command",
@@ -236,10 +284,49 @@ export default function (pi: ExtensionAPI) {
       if (ok) return;
       return { block: true, reason: "User denied risky command" };
     }
-
     return {
       block: true,
       reason: "Blocked: risky command in subagent (no UI to confirm)",
     };
+  });
+
+  pi.registerCommand("bash-gate", {
+    description: "Configure the bash safety gate model",
+    handler: async (_args: string, ctx: {
+      hasUI?: boolean;
+      ui?: {
+        select?: (
+          title: string,
+          options: string[],
+        ) => Promise<string | null>;
+        notify?: (message: string, type: string) => void;
+      };
+    }) => {
+      if (!ctx.hasUI || !ctx.ui?.select) {
+        pi.logger?.info?.(
+          `bash-gate: current model=${MODEL} (no UI to change)`,
+        );
+        return;
+      }
+
+      const selected = await ctx.ui.select(
+        "Bash gate: choose classifier model",
+        MODEL_OPTIONS.map((o) => o.label),
+      );
+
+      if (selected === null || selected === undefined) return;
+
+      const match = MODEL_OPTIONS.find((o) => o.label === selected);
+      if (!match) return;
+
+      saveConfig({ model: match.value });
+      ctx.ui?.notify?.(
+        `bash-gate: model set to ${match.value} — restart omp to apply`,
+        "info",
+      );
+      pi.logger?.info?.(
+        `bash-gate: model changed to ${match.value} (restart required)`,
+      );
+    },
   });
 }
