@@ -124,7 +124,15 @@ async function classifyWithModel(
 
   let apiKey: string | undefined;
   try {
-    const k: unknown = await reg.getApiKeyForProvider("openrouter");
+    // Race key resolution against a 3s timeout — if the registry hangs
+    // (observed in plugin context), fail to null instead of blocking 30s.
+    const keyTimeout = new Promise<null>((resolve) =>
+      setTimeout(() => resolve(null), 3000),
+    );
+    const k: unknown = await Promise.race([
+      reg.getApiKeyForProvider("openrouter"),
+      keyTimeout,
+    ]);
     if (typeof k === "string") {
       apiKey = k;
     } else if (k && typeof k === "object") {
