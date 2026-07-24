@@ -1,0 +1,43 @@
+{
+  "name": "omp-bash-gate",
+  "version": "0.1.0",
+  "description": "Model-assisted bash command safety gate for Oh My Pi (omp)",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "bun test"
+  },
+  "keywords": [
+    "oh-my-pi",
+    "omp",
+    "extension",
+    "security",
+    "approval",
+    "bash",
+    "classifier"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sinan/omp-bash-gate.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sinan/omp-bash-gate/issues"
+  },
+  "homepage": "https://github.com/sinan/omp-bash-gate#readme",
+  "omp": {
+    "extensions": [
+      "./src/bash-gate.ts"
+    ]
+  },
+  "devDependencies": {
+    "@oh-my-pi/pi-coding-agent": "^17.0.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
