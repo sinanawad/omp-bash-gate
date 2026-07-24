@@ -83,10 +83,10 @@ const BLOCK_PATTERNS: RegExp[] = [
 ];
 
 const FILE_CONFIG = loadConfig();
-const MODEL =
-  FILE_CONFIG.model ??
-  process.env.BASH_GATE_MODEL ??
-  "anthropic/claude-haiku-4.5";
+// No default model — if the user hasn't configured one (via /bash-gate or
+// BASH_GATE_MODEL), we skip the classifier and let omp's native approval
+// mode handle ambiguous commands. Never silently pick a model for them.
+const MODEL = FILE_CONFIG.model ?? process.env.BASH_GATE_MODEL ?? null;
 const REQUEST_TIMEOUT_MS = Number(process.env.BASH_GATE_TIMEOUT_MS ?? 5000);
 const MAX_TOKENS = Number(process.env.BASH_GATE_MAX_TOKENS ?? 16);
 const DEBUG = process.env.BASH_GATE_DEBUG === "1";
@@ -207,7 +207,15 @@ const RECOMMENDED_MODELS = [
 ];
 
 export default function (pi: ExtensionAPI) {
-  if (DEBUG) pi.logger?.info?.(`bash-gate: loaded (model=${MODEL})`);
+  if (DEBUG) pi.logger?.info?.(`bash-gate: loaded (model=${MODEL ?? "not configured"})`);
+  if (!MODEL) {
+    pi.on("session_start", (_e, ctx) => {
+      ctx.ui?.notify?.(
+        "bash-gate: no model configured — run /bash-gate to pick one",
+        "warn",
+      );
+    });
+  }
 
   pi.on("tool_call", async (event: ToolCallEvent, ctx: HookCtx) => {
     if (event.toolName !== "bash") return;
@@ -225,6 +233,22 @@ export default function (pi: ExtensionAPI) {
         "error",
       );
       return { block: true, reason: "Blocked by safety hook: dangerous pattern" };
+    }
+    // If no model is configured, don't silently classify — let omp's
+    // native approval handle it (prompt the user, or block in headless).
+    if (!MODEL) {
+      if (ctx.hasUI && ctx.ui?.confirm) {
+        const ok = await ctx.ui.confirm(
+          "⚠️ No model configured — allow command?",
+          `bash-gate has no classifier model set. Run /bash-gate to configure one.\n\n${cmd.slice(0, 500)}`,
+        );
+        if (ok) return;
+        return { block: true, reason: "User denied (no model configured)" };
+      }
+      return {
+        block: true,
+        reason: "Blocked: no model configured and no UI to confirm (run /bash-gate)",
+      };
     }
 
     ctx.ui?.setStatus?.("bash-gate", `🤔 classifying: ${cmd.slice(0, 60)}`);

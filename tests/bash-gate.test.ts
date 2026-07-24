@@ -1,5 +1,11 @@
-import { describe, it, expect } from "bun:test";
-import { default as ext } from "../src/bash-gate.ts";
+// Must set BASH_GATE_MODEL before importing the extension, so the module-level
+// constant resolves to a real model. ESM imports are hoisted, so we use a
+// dynamic import wrapper.
+const BASH_GATE_MODEL = "test-model";
+process.env.BASH_GATE_MODEL = BASH_GATE_MODEL;
+
+const { default: ext } = await import("../src/bash-gate.ts");
+const { describe, it, expect } = await import("bun:test");
 
 type ToolCallEvent = {
   toolName?: string;
@@ -49,6 +55,7 @@ function makeHarness(opts?: {
     },
     registerCommand: (_name: string, _def: unknown) => {},
   } as const;
+
   ext(pi);
 
   return {

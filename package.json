@@ -10,7 +10,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "bun test"
+    "test": "BASH_GATE_MODEL=test-model bun test"
   },
   "keywords": [
     "oh-my-pi",
