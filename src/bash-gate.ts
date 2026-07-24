@@ -189,24 +189,13 @@ async function classifyWithModel(
   }
 }
 
-// Model options for the /bash-gate slash command.
-const MODEL_OPTIONS = [
-  {
-    label: "Claude Haiku 4.5 (recommended — non-thinking, cheap, reliable)",
-    value: "anthropic/claude-haiku-4.5",
-  },
-  {
-    label: "Kimi K2 (non-thinking, budget)",
-    value: "moonshotai/kimi-k2",
-  },
-  {
-    label: "DeepSeek V4 Pro (thinking — may truncate)",
-    value: "deepseek/deepseek-v4-pro",
-  },
-  {
-    label: "Gemini 3.5 Flash (thinking — may truncate)",
-    value: "google/gemini-3.5-flash",
-  },
+// Recommended non-thinking models (shown if the user has them authenticated).
+// The user can also type a custom model id directly.
+const RECOMMENDED_MODELS = [
+  "anthropic/claude-haiku-4.5",
+  "moonshotai/kimi-k2",
+  "google/gemini-3.5-flash",
+  "deepseek/deepseek-v4-pro",
 ];
 
 export default function (pi: ExtensionAPI) {
@@ -292,16 +281,24 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("bash-gate", {
     description: "Configure the bash safety gate model",
-    handler: async (_args: string, ctx: {
-      hasUI?: boolean;
-      ui?: {
-        select?: (
-          title: string,
-          options: string[],
-        ) => Promise<string | null>;
-        notify?: (message: string, type: string) => void;
-      };
-    }) => {
+    handler: async (
+      _args: string,
+      ctx: {
+        hasUI?: boolean;
+        ui?: {
+          select?: (
+            title: string,
+            options: string[],
+          ) => Promise<string | null>;
+          input?: (title: string, placeholder?: string) => Promise<string | null>;
+          notify?: (message: string, type: string) => void;
+        };
+        models?: {
+          list?: () => unknown[];
+          resolve?: (spec: string) => unknown;
+        };
+      },
+    ) => {
       if (!ctx.hasUI || !ctx.ui?.select) {
         pi.logger?.info?.(
           `bash-gate: current model=${MODEL} (no UI to change)`,
@@ -309,23 +306,78 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      // Build options from the user's authenticated models, filtered to
+      // recommended ones, plus a custom-entry option.
+      const available = new Set<string>();
+      if (ctx.models?.list) {
+        for (const m of ctx.models.list() as Array<{ id?: string }>) {
+          if (m?.id) available.add(m.id);
+        }
+      }
+
+      const recommended = RECOMMENDED_MODELS.filter((m) => available.has(m));
+      const options = [
+        ...recommended,
+        "── Type a custom model id ──",
+      ];
+
+      if (recommended.length === 0) {
+        // No recommended models available — go straight to custom input.
+        const custom = await ctx.ui.input?.(
+          "Bash gate: enter model id",
+          "e.g. anthropic/claude-haiku-4.5",
+        );
+        if (!custom?.trim()) return;
+        const resolved = ctx.models?.resolve?.(custom.trim());
+        if (!resolved) {
+          ctx.ui?.notify?.(
+            `bash-gate: "${custom.trim()}" not found in your models — not saved`,
+            "error",
+          );
+          return;
+        }
+        saveConfig({ model: custom.trim() });
+        ctx.ui?.notify?.(
+          `bash-gate: model set to ${custom.trim()} — restart omp to apply`,
+          "info",
+        );
+        return;
+      }
+
       const selected = await ctx.ui.select(
-        "Bash gate: choose classifier model",
-        MODEL_OPTIONS.map((o) => o.label),
+        `Bash gate: choose classifier model (current: ${MODEL})`,
+        options,
       );
 
       if (selected === null || selected === undefined) return;
 
-      const match = MODEL_OPTIONS.find((o) => o.label === selected);
-      if (!match) return;
+      let modelId: string;
+      if (selected.startsWith("──")) {
+        const custom = await ctx.ui.input?.(
+          "Bash gate: enter model id",
+          "e.g. anthropic/claude-haiku-4.5",
+        );
+        if (!custom?.trim()) return;
+        const resolved = ctx.models?.resolve?.(custom.trim());
+        if (!resolved) {
+          ctx.ui?.notify?.(
+            `bash-gate: "${custom.trim()}" not found in your models — not saved`,
+            "error",
+          );
+          return;
+        }
+        modelId = custom.trim();
+      } else {
+        modelId = selected;
+      }
 
-      saveConfig({ model: match.value });
+      saveConfig({ model: modelId });
       ctx.ui?.notify?.(
-        `bash-gate: model set to ${match.value} — restart omp to apply`,
+        `bash-gate: model set to ${modelId} — restart omp to apply`,
         "info",
       );
       pi.logger?.info?.(
-        `bash-gate: model changed to ${match.value} (restart required)`,
+        `bash-gate: model changed to ${modelId} (restart required)`,
       );
     },
   });
