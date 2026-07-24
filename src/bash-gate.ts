@@ -211,7 +211,7 @@ export default function (pi: ExtensionAPI) {
   if (!MODEL) {
     pi.on("session_start", (_e, ctx) => {
       ctx.ui?.notify?.(
-        "⚠️ BASH-GATE: No model configured — run /bash-gate to pick one",
+        "⚠️ BASH-GATE: No model configured — run /bash-gate to pick one. For best results use: omp config set tools.approval '{\"bash\":\"allow\"}'",
         "warn",
       );
     });
