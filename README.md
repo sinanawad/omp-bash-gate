@@ -19,7 +19,7 @@ Fail-safe: if the model call fails or times out, it retries once, then blocks.
 ### Option A — Plugin install (recommended)
 
 ```bash
-omp plugin install github:sinan/omp-bash-gate
+omp plugin install github:sinanawad/omp-bash-gate
 ```
 
 Restart omp after installation.
@@ -27,7 +27,7 @@ Restart omp after installation.
 ### Option B — Clone + extensions setting
 
 ```bash
-git clone https://github.com/sinan/omp-bash-gate.git ~/repos/omp-bash-gate
+git clone https://github.com/sinanawad/omp-bash-gate.git ~/repos/omp-bash-gate
 ```
 
 Add to `~/.omp/agent/config.yml`:
@@ -77,10 +77,10 @@ This lets the gate be the sole safety layer for bash commands. The native `bash:
 
 ```bash
 cd omp-bash-gate
-npm test
+bun test
 ```
 
-Tests use `node --test` with mocked fetch — no API key or network needed.
+Tests use `bun test` with mocked fetch — no API key or network needed.
 
 ## Security notes
 

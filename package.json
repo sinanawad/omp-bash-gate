@@ -23,12 +23,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sinan/omp-bash-gate.git"
+    "url": "git+https://github.com/sinanawad/omp-bash-gate.git"
   },
   "bugs": {
-    "url": "https://github.com/sinan/omp-bash-gate/issues"
+    "url": "https://github.com/sinanawad/omp-bash-gate/issues"
   },
-  "homepage": "https://github.com/sinan/omp-bash-gate#readme",
+  "homepage": "https://github.com/sinanawad/omp-bash-gate#readme",
   "omp": {
     "extensions": [
       "./src/bash-gate.ts"
