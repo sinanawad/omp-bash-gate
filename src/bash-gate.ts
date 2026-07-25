@@ -46,12 +46,39 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 
+/** Directory this module was loaded from. */
+function moduleDir(): string {
+  return typeof import.meta.dir === "string"
+    ? import.meta.dir
+    : dirname(fileURLToPath(import.meta.url));
+}
+
+/**
+ * The command that actually upgrades *this* copy, inferred from where it lives.
+ * omp installs a marketplace plugin to `plugins/cache/plugins/<mkt>___<name>___<ver>`
+ * and a direct git install to `plugins/node_modules/<pkg>`, so the two need
+ * different advice — telling a marketplace user to re-run `plugin install` is wrong.
+ * Exported for tests.
+ */
+export function upgradeHintFor(dir: string): string {
+  const marketplace = dir.match(/[/\\]plugins[/\\]cache[/\\]plugins[/\\]([^/\\]+)___([^/\\]+)___/);
+  if (marketplace) {
+    const [, mkt, name] = marketplace;
+    // A plain `plugin upgrade` compares against the cached catalog, which omp
+    // only re-fetches once a day — so refreshing it is the reliable step.
+    return `omp plugin marketplace update ${mkt} — then omp upgrades ${name}@${mkt} on the next start`;
+  }
+  if (/[/\\]plugins[/\\]node_modules[/\\]/.test(dir)) {
+    return "omp plugin install github:sinanawad/omp-bash-gate";
+  }
+  return "git pull in your clone (or re-install)";
+}
+
 /** Plugin version, read from the package manifest when installed as a package.
  *  A bare single-file copy has no manifest and reports "unpackaged". */
 function readVersion(): string {
   try {
-    const here =
-      typeof import.meta.dir === "string" ? import.meta.dir : dirname(fileURLToPath(import.meta.url));
+    const here = moduleDir();
     const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf-8")) as {
       name?: string;
       version?: string;
@@ -156,7 +183,8 @@ const UPDATE_URL =
   "https://raw.githubusercontent.com/sinanawad/omp-bash-gate/main/package.json";
 const UPDATE_TTL_MS = 24 * 60 * 60 * 1000;
 const UPDATE_FETCH_TIMEOUT_MS = 1500;
-const UPGRADE_HINT = "omp plugin install github:sinanawad/omp-bash-gate";
+/** Upgrade command matching how this copy was actually installed. */
+const UPGRADE_HINT = upgradeHintFor(moduleDir());
 
 /** True when `candidate` is a higher dotted-numeric version than `current`. */
 function isNewerVersion(candidate: string, current: string): boolean {

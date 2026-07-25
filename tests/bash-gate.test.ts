@@ -707,7 +707,10 @@ describe("update check", () => {
     const { ctx, notifies } = makeCtx();
     handlers.session_start({}, ctx);
     expect(notifies[0].msg).toContain("update available: v99.0.0");
-    expect(notifies[0].msg).toContain("omp plugin install");
+    // The suggested command depends on how this copy was installed; under test
+    // the module lives in a clone, so it advises pulling.
+    expect(notifies[0].msg).toContain("(run: ");
+    expect(notifies[0].msg).toContain("git pull");
   });
 
   it("says nothing when the cached version is not newer", async () => {
@@ -841,5 +844,33 @@ describe("/bash-gate test", () => {
     const { ctx, notifies } = makeCmdCtx({ known: [], hasUI: false });
     await commands["bash-gate"].handler("testfoo", ctx);
     expect(notifies.some((n) => n.msg.includes("does not resolve"))).toBe(true);
+  });
+});
+
+// --- Upgrade hint matches how this copy was installed ------------------------
+
+describe("upgrade hint", () => {
+  const load = async () =>
+    (await import(`../src/bash-gate.ts?hint=${importCounter++}`)) as {
+      upgradeHintFor: (dir: string) => string;
+    };
+
+  it("marketplace installs are told to refresh the catalog, not re-install", async () => {
+    const { upgradeHintFor } = await load();
+    const hint = upgradeHintFor("/home/u/.omp/plugins/cache/plugins/sinanawad___bash-gate___0.5.0/src");
+    expect(hint).toContain("omp plugin marketplace update sinanawad");
+    expect(hint).toContain("bash-gate@sinanawad");
+    expect(hint).not.toContain("plugin install github:");
+  });
+
+  it("direct git installs are told to re-run the install command", async () => {
+    const { upgradeHintFor } = await load();
+    const hint = upgradeHintFor("/home/u/.omp/plugins/node_modules/omp-bash-gate/src");
+    expect(hint).toBe("omp plugin install github:sinanawad/omp-bash-gate");
+  });
+
+  it("a clone is told to pull", async () => {
+    const { upgradeHintFor } = await load();
+    expect(upgradeHintFor("/home/u/repos/omp-bash-gate/src")).toContain("git pull");
   });
 });

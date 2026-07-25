@@ -31,6 +31,14 @@ Note the marketplace source is the bare `owner/repo` form — a `github:` prefix
 
 Why this one for a team: omp checks marketplace plugins for updates at startup (non-blocking). With `marketplace.autoUpdate: auto` in `~/.omp/agent/config.yml`, teammates are upgraded **automatically** when a new version is published — no one has to re-run anything. `omp plugin upgrade` also works for marketplace plugins (it does nothing for direct git installs).
 
+> **Timing:** omp only re-fetches a marketplace catalog when its cached copy is **more than 24 h old**, so a freshly published release is not visible immediately — the startup check compares against the cached catalog and correctly finds nothing to do. Releases therefore reach a machine within about a day. To pick one up right away:
+>
+> ```bash
+> omp plugin marketplace update sinanawad   # re-fetch the catalog
+> ```
+>
+> after which the next omp start upgrades the plugin automatically (or run `omp plugin upgrade bash-gate@sinanawad` to do it now).
+
 Releases stay deliberate: the catalog pins an exact tag, so people move only when that pin is bumped.
 
 ### Option B — Direct git install
