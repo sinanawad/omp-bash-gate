@@ -21,12 +21,14 @@ The blocklist runs **before** the allowlist, so a deterministic block can never 
 ### Option A — Plugin install (recommended for teams)
 
 ```bash
-# track the default branch (picks up updates)
+# installs whatever the default branch points at right now
 omp plugin install github:sinanawad/omp-bash-gate
 
-# or pin to a tag/commit for a reproducible team rollout
+# or pin to a tag/commit so every machine provably runs the same code
 omp plugin install github:sinanawad/omp-bash-gate#v0.2.0
 ```
+
+Neither form auto-updates: the resolved commit is held in a lockfile, so an install stays put until you explicitly re-run the install command (see [Updating](#updating)).
 
 Restart omp after installing. Verify with `omp plugin list` — you should see `omp-bash-gate` and its version.
 
@@ -117,7 +119,7 @@ Then restart omp and confirm the version in the startup banner or `omp plugin li
    git tag -a v0.2.0 -m "bash-gate v0.2.0"
    git push origin v0.2.0
    ```
-2. **Share one pinned install command** (pinning to a tag means an install never silently changes under someone):
+2. **Share one pinned install command** (so every machine provably runs the same code, and version moves are an explicit, reviewable step rather than "whatever `main` happened to be when each person installed"):
    ```bash
    omp plugin install github:sinanawad/omp-bash-gate#v0.2.0
    ```
