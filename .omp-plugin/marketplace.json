@@ -10,12 +10,12 @@
   "plugins": [
     {
       "name": "bash-gate",
-      "version": "0.4.1",
+      "version": "0.5.0",
       "description": "Model-assisted bash command safety gate: instant block/allow lists plus classification through your own omp provider.",
       "source": {
         "source": "github",
         "repo": "sinanawad/omp-bash-gate",
-        "ref": "v0.4.1"
+        "ref": "v0.5.0"
       },
       "author": {
         "name": "Sinan"

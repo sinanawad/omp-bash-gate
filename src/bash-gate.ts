@@ -547,6 +547,11 @@ export default function (pi: ExtensionAPI) {
     getArgumentCompletions: (argumentPrefix: string): CompletionItem[] => {
       const items: CompletionItem[] = [
         { value: "status", label: "status", description: "Show the current classifier model" },
+        {
+          value: "test ",
+          label: "test <command>",
+          description: "Dry-run: what would the gate do? (never executes it)",
+        },
         { value: "off", label: "off", description: "Clear the model — ambiguous commands prompt" },
       ];
       for (const role of SUGGESTED_ROLES) {
@@ -595,6 +600,45 @@ export default function (pi: ExtensionAPI) {
       };
 
       const arg = args.trim();
+
+      // Dry-run: report what the gate would do, without ever executing the
+      // command. This is the safe way to probe blocklist coverage — the real
+      // command is never handed to a shell.
+      if (arg === "test" || arg.startsWith("test ")) {
+        const probe = arg.slice(4).trim();
+        if (!probe) {
+          say("usage: /bash-gate test <command>", "error");
+          return;
+        }
+        const blocked = blockReason(probe);
+        if (blocked) {
+          say(`would BLOCK — tier 2 blocklist (${blocked}): ${sanitize(probe)}`);
+          return;
+        }
+        if (isAllowlisted(probe)) {
+          say(`would ALLOW — tier 1 allowlist: ${sanitize(probe)}`);
+          return;
+        }
+        if (!currentModel) {
+          say(`would PROMPT — no classifier model configured: ${sanitize(probe)}`);
+          return;
+        }
+        if (probe.length > MAX_COMMAND_CHARS) {
+          say(`would PROMPT — too long to classify safely: ${sanitize(probe)}`);
+          return;
+        }
+        const verdict = await classifyWithModel(ctx, pi.logger ?? {}, probe);
+        const outcome =
+          verdict === "safe"
+            ? "would ALLOW — tier 3 classified it safe"
+            : verdict === "dangerous"
+              ? "would BLOCK — tier 3 classified it dangerous"
+              : verdict === "risky"
+                ? "would PROMPT — tier 3 classified it risky"
+                : "would PROMPT — classifier unavailable (fail-closed)";
+        say(`${outcome}: ${sanitize(probe)}`);
+        return;
+      }
 
       // Non-interactive forms; these also work headlessly (scripted rollouts).
       if (arg === "status") {

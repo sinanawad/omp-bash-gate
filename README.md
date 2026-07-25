@@ -85,9 +85,18 @@ Reasoning is always disabled for the classification call, so "thinking" models a
 | `/bash-gate` | Open the picker (below). |
 | `/bash-gate <model-spec>` | Set the classifier directly, e.g. `/bash-gate @smol` or `/bash-gate anthropic/claude-haiku-4.5`. Rejected if the spec doesn't resolve for your providers. |
 | `/bash-gate status` | Show the version, current model, what it resolves to, and the config path. |
+| `/bash-gate test <command>` | **Dry-run.** Report which tier would fire and what the verdict would be — the command is never executed. |
 | `/bash-gate off` | Clear the model — ambiguous commands go back to prompting. |
 
 Arguments tab-complete. The non-interactive forms also work with no UI, so a rollout can be scripted.
+
+`test` is the safe way to check policy on a live install: it runs the same tier logic the hook does and prints the outcome, but never hands the command to a shell. Use it instead of actually running a dangerous command to see whether the gate catches it.
+
+```
+/bash-gate test rm -rf /            → would BLOCK — tier 2 blocklist (recursive force-delete of a dangerous target)
+/bash-gate test ls -la              → would ALLOW — tier 1 allowlist
+/bash-gate test npm install foo     → would PROMPT — tier 3 classified it risky
+```
 
 The picker offers, in order:
 

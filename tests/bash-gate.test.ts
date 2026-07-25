@@ -571,6 +571,9 @@ function makeCmdCtx(opts: {
         known.has(spec) ? { id: spec.replace(/^@/, "resolved-"), provider: "test" } : undefined,
       list: () => opts.list ?? [],
     },
+    // ExtensionCommandContext extends ExtensionContext, so the real command ctx
+    // carries the registry too — /bash-gate test classifies through it.
+    modelRegistry: { resolver: (_m: any) => "RESOLVER" },
   };
   return { ctx, notifies, titles, offered };
 }
@@ -786,5 +789,57 @@ describe("update check", () => {
     await commands["bash-gate"].handler("@nope", ctx); // no-op, does not resolve
     await commands["bash-gate"].handler("off", ctx);
     expect(readState().model).toBeUndefined();
+  });
+});
+
+// --- /bash-gate test (dry-run) ----------------------------------------------
+
+describe("/bash-gate test", () => {
+  const runTest = async (probe: string, model: string | null = "test-model") => {
+    const { commands } = await loadPlugin(model);
+    const { ctx, notifies } = makeCmdCtx({ known: ["test-model"], hasUI: false });
+    await commands["bash-gate"].handler(`test ${probe}`, ctx);
+    return notifies.map((n) => n.msg).join(" ");
+  };
+
+  it("reports a tier-2 block without running the command", async () => {
+    const msg = await runTest("rm -rf /");
+    expect(msg).toContain("would BLOCK");
+    expect(msg).toContain("tier 2");
+    expect(completeCalls.length).toBe(0); // no classifier call either
+  });
+
+  it("reports a tier-1 allow", async () => {
+    const msg = await runTest("ls -la");
+    expect(msg).toContain("would ALLOW");
+    expect(msg).toContain("tier 1");
+  });
+
+  it("reports the tier-3 verdict for an ambiguous command", async () => {
+    completeQueue = [() => Promise.resolve(okMsg("risky"))];
+    const msg = await runTest("npm install left-pad");
+    expect(msg).toContain("would PROMPT");
+    expect(msg).toContain("risky");
+  });
+
+  it("reports a would-prompt when no model is configured", async () => {
+    const msg = await runTest("npm install", null);
+    expect(msg).toContain("would PROMPT");
+    expect(msg).toContain("no classifier model");
+  });
+
+  it("rejects an empty probe with usage", async () => {
+    const { commands } = await loadPlugin("test-model");
+    const { ctx, notifies } = makeCmdCtx({ known: ["test-model"], hasUI: false });
+    await commands["bash-gate"].handler("test", ctx);
+    expect(notifies.some((n) => n.type === "error" && n.msg.includes("usage"))).toBe(true);
+  });
+
+  it("does not treat a command starting with 'test' as a dry-run", async () => {
+    // `/bash-gate testfoo` is a model spec, not the test subcommand.
+    const { commands } = await loadPlugin("test-model");
+    const { ctx, notifies } = makeCmdCtx({ known: [], hasUI: false });
+    await commands["bash-gate"].handler("testfoo", ctx);
+    expect(notifies.some((n) => n.msg.includes("does not resolve"))).toBe(true);
   });
 });
