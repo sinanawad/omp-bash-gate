@@ -18,14 +18,27 @@ The blocklist runs **before** the allowlist, so a deterministic block can never 
 
 ## Install
 
-### Option A — Plugin install (recommended for teams)
+### Option A — Marketplace (recommended for teams)
+
+Add the marketplace once, then install from it:
+
+```bash
+omp plugin marketplace add github:sinanawad/omp-bash-gate
+omp plugin install bash-gate@sinanawad
+```
+
+Why this one for a team: omp checks marketplace plugins for updates at startup (non-blocking). With `marketplace.autoUpdate: auto` in `~/.omp/agent/config.yml`, teammates are upgraded **automatically** when a new version is published — no one has to re-run anything. `omp plugin upgrade` also works for marketplace plugins (it does nothing for direct git installs).
+
+Releases stay deliberate: the catalog pins an exact tag, so people move only when that pin is bumped.
+
+### Option B — Direct git install
 
 ```bash
 # installs whatever the default branch points at right now
 omp plugin install github:sinanawad/omp-bash-gate
 
 # or pin to a tag/commit so every machine provably runs the same code
-omp plugin install github:sinanawad/omp-bash-gate#v0.3.0
+omp plugin install github:sinanawad/omp-bash-gate#v0.4.0
 ```
 
 Neither form auto-updates: the resolved commit is held in a lockfile, so an install stays put until you explicitly re-run the install command (see [Updating](#updating)).
@@ -34,7 +47,7 @@ Restart omp after installing. Verify with `omp plugin list` — you should see `
 
 This installs into omp's own plugins directory via `bun install`. The plugin declares **no runtime dependencies**: it imports `@oh-my-pi/pi-ai`, which omp resolves from its own installation through the extension loader's specifier shim (the `@oh-my-pi/*` packages are declared as *optional* peer dependencies precisely so they are not downloaded again).
 
-### Option B — Clone + extensions setting
+### Option C — Clone + extensions setting
 
 Best when you want to hack on it locally, since edits apply on the next omp restart.
 
@@ -49,13 +62,13 @@ extensions:
   - ~/repos/omp-bash-gate
 ```
 
-### Option C — Copy the single file
+### Option D — Copy the single file
 
 ```bash
 cp src/bash-gate.ts ~/.omp/agent/extensions/bash-gate.ts
 ```
 
-`<omp config dir>/extensions/` is scanned automatically, so no config change is needed. This works because omp rewrites the plugin's `@oh-my-pi/*` imports to its own copies — but it means the copied file **cannot be imported by plain `bun`/`node` outside omp**, so don't try to smoke-test it standalone. It also carries no version identity (the startup banner reads `unpackaged`) and has **no update path** (see [Updating](#updating)). Prefer A or B.
+`<omp config dir>/extensions/` is scanned automatically, so no config change is needed. This works because omp rewrites the plugin's `@oh-my-pi/*` imports to its own copies — but it means the copied file **cannot be imported by plain `bun`/`node` outside omp**, so don't try to smoke-test it standalone. It also carries no version identity (the startup banner reads `unpackaged`) and has **no update path** (see [Updating](#updating)). Prefer A, B, or C.
 
 ## Configuration
 
@@ -91,6 +104,8 @@ If none of the suggestions resolve, the picker says so and names the providers y
 | `BASH_GATE_TIMEOUT_MS` | `5000` | Classifier timeout in ms. Invalid values fall back to the default with a warning. |
 | `BASH_GATE_MAX_TOKENS` | `16` | Max output tokens for the classifier. |
 | `BASH_GATE_STATE_FILE` | `<omp config dir>/agent/bash-gate.json` | Full path override for the saved-model state file. |
+| `BASH_GATE_UPDATE_CHECK` | `1` | Set to `0` to disable the update check (no network calls to GitHub). |
+| `BASH_GATE_UPDATE_URL` | GitHub raw `package.json` | Override the URL the update check reads. |
 | `BASH_GATE_DEBUG` | (unset) | Set to `1` for verbose logging. |
 
 **No model by default:** the plugin does not assume a provider or model. Until you run `/bash-gate` (or set `BASH_GATE_MODEL`), ambiguous commands prompt you (with UI) or block (headless). Safe and dangerous commands still work with no model.
@@ -117,41 +132,50 @@ tools:
 
 ```bash
 omp plugin install github:sinanawad/omp-bash-gate      # tracking a branch
-omp plugin install github:sinanawad/omp-bash-gate#v0.3.0   # moving to a new pin
+omp plugin install github:sinanawad/omp-bash-gate#v0.4.0   # moving to a new pin
 ```
 
 Then restart omp and confirm the version in the startup banner or `omp plugin list`.
 
 > Note: `omp plugin upgrade` operates on **marketplace** plugins. It will not update a plugin installed directly from a git URL — use the command above for that.
 
-**omp will not tell you when a new version exists.** There is no update check for git-installed plugins, so nothing will prompt you. Compare the version in the startup banner (or `/bash-gate status`) against the repo when you want to know if you're behind.
+**omp itself will not tell you a new version exists** for a git-installed plugin — that machinery is marketplace-only. So the gate checks for itself: when a session ends it fetches the published version (1.5s budget, at most once a day) and caches the result; the next startup banner then reads:
 
-- **Option B:** `git -C ~/repos/omp-bash-gate pull`, then restart omp.
-- **Option C:** no update path — re-copy the file manually.
+```
+🛡️ bash-gate v0.4.0 active — classifier: @smol — update available: v0.5.0 (run: omp plugin install github:sinanawad/omp-bash-gate)
+```
+
+The check runs at shutdown precisely so startup never waits on the network, and it is skipped entirely for single-file copies. Disable it with `BASH_GATE_UPDATE_CHECK=0`.
+
+Marketplace installs (Option A) don't need this: omp upgrades them for you when `marketplace.autoUpdate` is `auto`.
+
+- **Option C:** `git -C ~/repos/omp-bash-gate pull`, then restart omp.
+- **Option D:** no update path — re-copy the file manually.
 
 ## Rolling out to a team
 
 1. **Tag a release** so everyone installs the same code:
    ```bash
-   git tag -a v0.3.0 -m "bash-gate v0.3.0"
-   git push origin v0.3.0
+   git tag -a v0.4.0 -m "bash-gate v0.4.0"
+   git push origin v0.4.0
    ```
 2. **Share one pinned install command** (so every machine provably runs the same code, and version moves are an explicit, reviewable step rather than "whatever `main` happened to be when each person installed"):
    ```bash
-   omp plugin install github:sinanawad/omp-bash-gate#v0.3.0
+   omp plugin install github:sinanawad/omp-bash-gate#v0.4.0
    ```
 3. **Have each person configure a classifier model** with `/bash-gate`. Each teammate uses whichever provider *they* have authenticated — there is no shared key and no required provider. Alternatively, standardise via env var: `export BASH_GATE_MODEL=anthropic/claude-haiku-4.5`.
 4. **Agree on the approval posture.** The safe default is to leave omp's native bash approval on (see below). If the team opts into `yolo` + `bash: allow`, make sure everyone knows to revert it if they ever remove the plugin.
-5. **Verify** after restart: the startup banner shows `🛡️ bash-gate v0.3.0 active — classifier: <model>`. Its absence means the gate is not loaded.
+5. **Verify** after restart: the startup banner shows `🛡️ bash-gate v0.4.0 active — classifier: <model>`. Its absence means the gate is not loaded.
 
 Private repos work the same way, as long as each machine's git credentials can clone the repo.
 
 ## Uninstall / Disable
 
 1. Remove the plugin:
-   - Option A: `omp plugin uninstall omp-bash-gate`
-   - Option B: delete the `extensions:` entry from `~/.omp/agent/config.yml`
-   - Option C: delete `~/.omp/agent/extensions/bash-gate.ts`
+   - Option A: `omp plugin uninstall bash-gate@sinanawad`
+   - Option B: `omp plugin uninstall omp-bash-gate`
+   - Option C: delete the `extensions:` entry from `~/.omp/agent/config.yml`
+   - Option D: delete `~/.omp/agent/extensions/bash-gate.ts`
 2. **If you set `yolo` + `bash: allow`**, revert it so bash is not left auto-approved — delete the `tools.approval.bash` key or set it back to `prompt`.
 
 ## Privacy & security notes

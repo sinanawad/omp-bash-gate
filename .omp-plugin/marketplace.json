@@ -1,0 +1,30 @@
+{
+  "name": "sinanawad",
+  "owner": {
+    "name": "Sinan"
+  },
+  "metadata": {
+    "description": "Oh My Pi plugins maintained by sinanawad",
+    "version": "1"
+  },
+  "plugins": [
+    {
+      "name": "bash-gate",
+      "version": "0.4.0",
+      "description": "Model-assisted bash command safety gate: instant block/allow lists plus classification through your own omp provider.",
+      "source": {
+        "source": "github",
+        "repo": "sinanawad/omp-bash-gate",
+        "ref": "v0.4.0"
+      },
+      "author": {
+        "name": "Sinan"
+      },
+      "homepage": "https://github.com/sinanawad/omp-bash-gate#readme",
+      "repository": "https://github.com/sinanawad/omp-bash-gate",
+      "license": "MIT",
+      "category": "security",
+      "keywords": ["security", "approval", "bash", "classifier"]
+    }
+  ]
+}

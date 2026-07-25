@@ -1,5 +1,5 @@
-import { describe, it, expect, mock, beforeEach, afterAll } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { describe, it, expect, mock, beforeEach, afterEach, afterAll } from "bun:test";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -33,8 +33,26 @@ mock.module("@oh-my-pi/pi-ai", () => ({
 type PluginFn = (pi: any) => void;
 let importCounter = 0;
 
-/** Import a fresh copy of the plugin with a chosen model env. */
-async function loadPlugin(model: string | null): Promise<{
+/** Path of the scratch state file the plugin reads/writes during tests. */
+const stateFilePath = () => join(SCRATCH_HOME, "bash-gate.json");
+
+/** Read the scratch state file as the plugin persisted it. */
+function readState(): { model?: string; updateCheck?: { checkedAt: number; latest: string } } {
+  try {
+    return JSON.parse(readFileSync(stateFilePath(), "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
+/** Import a fresh copy of the plugin with a chosen model env.
+ *  `env` sets (or, with undefined, clears) extra vars for this load only.
+ *  `keepState` preserves an existing state file instead of starting clean. */
+async function loadPlugin(
+  model: string | null,
+  env: Record<string, string | undefined> = {},
+  keepState = false,
+): Promise<{
   handlers: Record<string, Function>;
   commands: Record<string, any>;
   warns: string[];
@@ -42,13 +60,19 @@ async function loadPlugin(model: string | null): Promise<{
 }> {
   const prevStateFile = process.env.BASH_GATE_STATE_FILE;
   const prevModel = process.env.BASH_GATE_MODEL;
-  const stateFile = join(SCRATCH_HOME, "bash-gate.json");
+  const prevExtra: Record<string, string | undefined> = {};
+  for (const key of Object.keys(env)) prevExtra[key] = process.env[key];
+  const stateFile = stateFilePath();
   process.env.BASH_GATE_STATE_FILE = stateFile;
   // Start each load from a clean state file so only the env controls the model
   // (a prior /bash-gate save test writes to this scratch path).
-  rmSync(stateFile, { force: true });
+  if (!keepState) rmSync(stateFile, { force: true });
   if (model === null) delete process.env.BASH_GATE_MODEL;
   else process.env.BASH_GATE_MODEL = model;
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 
   const handlers: Record<string, Function> = {};
   const commands: Record<string, any> = {};
@@ -67,6 +91,10 @@ async function loadPlugin(model: string | null): Promise<{
   const mod = (await import(`../src/bash-gate.ts?c=${importCounter++}`)) as { default: PluginFn };
   mod.default(pi);
 
+  for (const [key, value] of Object.entries(prevExtra)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   if (prevStateFile === undefined) delete process.env.BASH_GATE_STATE_FILE;
   else process.env.BASH_GATE_STATE_FILE = prevStateFile;
   if (prevModel === undefined) delete process.env.BASH_GATE_MODEL;
@@ -637,5 +665,126 @@ describe("/bash-gate picker", () => {
     // second select call listed the concrete models, sorted
     expect(offered[1]).toEqual(["anthropic/a-model", "openai/b-model"]);
     expect(notifies.some((n) => n.msg.includes("set to anthropic/a-model"))).toBe(true);
+  });
+});
+
+// --- Update check (runs at shutdown, reported on the next start) -------------
+
+describe("update check", () => {
+  const FAKE_URL = "https://example.invalid/package.json";
+  const origFetch = globalThis.fetch;
+
+  function stubFetch(impl: () => Promise<any>) {
+    let calls = 0;
+    globalThis.fetch = ((() => {
+      calls++;
+      return impl();
+    }) as unknown) as typeof fetch;
+    return () => calls;
+  }
+
+  afterEach(() => {
+    globalThis.fetch = origFetch;
+  });
+
+  it("session_shutdown caches the latest version", async () => {
+    const { handlers } = await loadPlugin("test-model", { BASH_GATE_UPDATE_URL: FAKE_URL });
+    const calls = stubFetch(async () => ({ ok: true, json: async () => ({ version: "99.0.0" }) }));
+    await handlers.session_shutdown({}, makeCtx().ctx);
+    expect(calls()).toBe(1);
+    expect(readState().updateCheck?.latest).toBe("99.0.0");
+  });
+
+  it("the next startup banner reports the newer version", async () => {
+    writeFileSync(
+      stateFilePath(),
+      JSON.stringify({ model: "test-model", updateCheck: { checkedAt: Date.now(), latest: "99.0.0" } }),
+    );
+    const { handlers } = await loadPlugin(null, {}, true);
+    const { ctx, notifies } = makeCtx();
+    handlers.session_start({}, ctx);
+    expect(notifies[0].msg).toContain("update available: v99.0.0");
+    expect(notifies[0].msg).toContain("omp plugin install");
+  });
+
+  it("says nothing when the cached version is not newer", async () => {
+    writeFileSync(
+      stateFilePath(),
+      JSON.stringify({ model: "test-model", updateCheck: { checkedAt: Date.now(), latest: "0.0.1" } }),
+    );
+    const { handlers } = await loadPlugin(null, {}, true);
+    const { ctx, notifies } = makeCtx();
+    handlers.session_start({}, ctx);
+    expect(notifies[0].msg).not.toContain("update available");
+  });
+
+  it("does not re-check inside the TTL", async () => {
+    writeFileSync(
+      stateFilePath(),
+      JSON.stringify({ model: "test-model", updateCheck: { checkedAt: Date.now(), latest: "0.0.1" } }),
+    );
+    const { handlers } = await loadPlugin(null, { BASH_GATE_UPDATE_URL: FAKE_URL }, true);
+    const calls = stubFetch(async () => ({ ok: true, json: async () => ({ version: "99.0.0" }) }));
+    await handlers.session_shutdown({}, makeCtx().ctx);
+    expect(calls()).toBe(0);
+  });
+
+  it("re-checks once the TTL has elapsed", async () => {
+    const stale = Date.now() - 25 * 60 * 60 * 1000;
+    writeFileSync(
+      stateFilePath(),
+      JSON.stringify({ model: "test-model", updateCheck: { checkedAt: stale, latest: "0.0.1" } }),
+    );
+    const { handlers } = await loadPlugin(null, { BASH_GATE_UPDATE_URL: FAKE_URL }, true);
+    const calls = stubFetch(async () => ({ ok: true, json: async () => ({ version: "99.0.0" }) }));
+    await handlers.session_shutdown({}, makeCtx().ctx);
+    expect(calls()).toBe(1);
+    expect(readState().updateCheck?.latest).toBe("99.0.0");
+  });
+
+  it("BASH_GATE_UPDATE_CHECK=0 disables the check and the note", async () => {
+    writeFileSync(
+      stateFilePath(),
+      JSON.stringify({ model: "test-model", updateCheck: { checkedAt: 0, latest: "99.0.0" } }),
+    );
+    const { handlers } = await loadPlugin(
+      null,
+      { BASH_GATE_UPDATE_CHECK: "0", BASH_GATE_UPDATE_URL: FAKE_URL },
+      true,
+    );
+    const calls = stubFetch(async () => ({ ok: true, json: async () => ({ version: "99.0.0" }) }));
+    await handlers.session_shutdown({}, makeCtx().ctx);
+    expect(calls()).toBe(0);
+    const { ctx, notifies } = makeCtx();
+    handlers.session_start({}, ctx);
+    expect(notifies[0].msg).not.toContain("update available");
+  });
+
+  it("a failing check is silent and never throws", async () => {
+    const { handlers } = await loadPlugin("test-model", { BASH_GATE_UPDATE_URL: FAKE_URL });
+    stubFetch(async () => {
+      throw new Error("offline");
+    });
+    await handlers.session_shutdown({}, makeCtx().ctx);
+    expect(readState().updateCheck).toBeUndefined();
+  });
+
+  it("caching an update does not clobber the saved model", async () => {
+    const { handlers, commands } = await loadPlugin(null, { BASH_GATE_UPDATE_URL: FAKE_URL });
+    const { ctx } = makeCmdCtx({ known: ["@smol"], hasUI: false });
+    await commands["bash-gate"].handler("@smol", ctx);
+    stubFetch(async () => ({ ok: true, json: async () => ({ version: "99.0.0" }) }));
+    await handlers.session_shutdown({}, makeCtx().ctx);
+    const state = readState();
+    expect(state.model).toBe("@smol"); // survived the update-cache write
+    expect(state.updateCheck?.latest).toBe("99.0.0");
+  });
+
+  it("/bash-gate off persists the cleared model", async () => {
+    const { commands } = await loadPlugin("test-model");
+    const { ctx } = makeCmdCtx({ known: ["test-model"], hasUI: false });
+    await commands["bash-gate"].handler("@nope", ctx); // no-op, does not resolve
+    await commands["bash-gate"].handler("off", ctx);
+    expect(readState().model).toBeUndefined();
   });
 });

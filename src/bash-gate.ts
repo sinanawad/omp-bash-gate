@@ -79,13 +79,23 @@ function configDir(): string {
 // for tests); otherwise it lives under the resolved omp config dir.
 const STATE_FILE = process.env.BASH_GATE_STATE_FILE ?? join(configDir(), "bash-gate.json");
 
-type GateConfig = { model?: string };
+/** Result of the last update check, cached so startup never waits on network. */
+type UpdateCache = { checkedAt: number; latest: string };
+type GateConfig = { model?: string; updateCheck?: UpdateCache };
 
 function loadConfig(): GateConfig {
   try {
     if (existsSync(STATE_FILE)) {
       const parsed = JSON.parse(readFileSync(STATE_FILE, "utf-8")) as GateConfig;
-      if (parsed && typeof parsed.model === "string") return parsed;
+      if (parsed && typeof parsed === "object") {
+        const out: GateConfig = {};
+        if (typeof parsed.model === "string") out.model = parsed.model;
+        const uc = parsed.updateCheck;
+        if (uc && typeof uc.latest === "string" && typeof uc.checkedAt === "number") {
+          out.updateCheck = { latest: uc.latest, checkedAt: uc.checkedAt };
+        }
+        return out;
+      }
     }
   } catch {
     // ignore — fall through to env/none
@@ -93,11 +103,18 @@ function loadConfig(): GateConfig {
   return {};
 }
 
-/** Persist config. Returns false (never throws) if the write failed. */
-function saveConfig(cfg: GateConfig): boolean {
+/** In-memory mirror of the state file, so partial saves never drop other keys. */
+let fileConfig: GateConfig = loadConfig();
+
+/** Merge a patch into the state file. `undefined` values clear their key.
+ *  Returns false (never throws) if the write failed. */
+function saveConfig(patch: GateConfig): boolean {
+  const merged: GateConfig = { ...fileConfig, ...patch };
+  if (patch.model === undefined && "model" in patch) delete merged.model;
   try {
     mkdirSync(dirname(STATE_FILE), { recursive: true });
-    writeFileSync(STATE_FILE, JSON.stringify(cfg, null, 2) + "\n");
+    writeFileSync(STATE_FILE, JSON.stringify(merged, null, 2) + "\n");
+    fileConfig = merged;
     return true;
   } catch {
     return false;
@@ -112,10 +129,9 @@ function numEnv(raw: string | undefined, def: number): { value: number; invalid:
   return Number.isFinite(n) && n > 0 ? { value: n, invalid: false } : { value: def, invalid: true };
 }
 
-const FILE_CONFIG = loadConfig();
 // No default model — if the user hasn't configured one, tier-3 is skipped and
 // ambiguous commands prompt (with UI) or block (headless). Never silently pick.
-let currentModel: string | null = FILE_CONFIG.model ?? process.env.BASH_GATE_MODEL ?? null;
+let currentModel: string | null = fileConfig.model ?? process.env.BASH_GATE_MODEL ?? null;
 
 const TIMEOUT = numEnv(process.env.BASH_GATE_TIMEOUT_MS, 5000);
 const MAX_TOKENS_CFG = numEnv(process.env.BASH_GATE_MAX_TOKENS, 16);
@@ -126,6 +142,75 @@ const DEBUG = process.env.BASH_GATE_DEBUG === "1";
 /** Longest command we will classify. Longer commands are never auto-allowed on
  *  a truncated view — they are prompted/blocked instead (see handler). */
 const MAX_COMMAND_CHARS = 4000;
+
+// --- Update check ------------------------------------------------------------
+//
+// Checked on session shutdown, reported on the next session start. Startup never
+// waits on the network, and the check runs when the session is ending anyway.
+// omp caps session_shutdown handlers at 2s, so the fetch budget stays under it;
+// if it does not finish, the cache simply refreshes on a later exit.
+
+const UPDATE_CHECK_ENABLED = process.env.BASH_GATE_UPDATE_CHECK !== "0";
+const UPDATE_URL =
+  process.env.BASH_GATE_UPDATE_URL ??
+  "https://raw.githubusercontent.com/sinanawad/omp-bash-gate/main/package.json";
+const UPDATE_TTL_MS = 24 * 60 * 60 * 1000;
+const UPDATE_FETCH_TIMEOUT_MS = 1500;
+const UPGRADE_HINT = "omp plugin install github:sinanawad/omp-bash-gate";
+
+/** True when `candidate` is a higher dotted-numeric version than `current`. */
+function isNewerVersion(candidate: string, current: string): boolean {
+  const parse = (v: string): number[] =>
+    v
+      .replace(/^v/, "")
+      .split(/[.\-+]/)
+      .slice(0, 3)
+      .map((part) => {
+        const n = Number.parseInt(part, 10);
+        return Number.isFinite(n) ? n : 0;
+      });
+  const a = parse(candidate);
+  const b = parse(current);
+  for (let i = 0; i < 3; i++) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+
+/** Refresh the cached latest version. Never throws; silent when offline. */
+async function refreshUpdateCache(logger: Logger): Promise<void> {
+  if (!UPDATE_CHECK_ENABLED || VERSION === "unpackaged") return;
+  const last = fileConfig.updateCheck?.checkedAt ?? 0;
+  if (Date.now() - last < UPDATE_TTL_MS) return;
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), UPDATE_FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(UPDATE_URL, {
+      signal: ctrl.signal,
+      headers: { accept: "application/json" },
+    });
+    if (!res.ok) return;
+    const data = (await res.json()) as { version?: unknown };
+    if (typeof data?.version !== "string") return;
+    saveConfig({ updateCheck: { checkedAt: Date.now(), latest: data.version } });
+    if (DEBUG) logger.info?.(`bash-gate: update check — latest is ${data.version}`);
+  } catch {
+    // offline, slow, or shutting down — retry on a later exit
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Banner suffix built from the previous exit's check. Empty when up to date. */
+function updateNote(): string {
+  const latest = fileConfig.updateCheck?.latest;
+  if (!UPDATE_CHECK_ENABLED || VERSION === "unpackaged" || !latest) return "";
+  if (!isNewerVersion(latest, VERSION)) return "";
+  return ` — update available: v${latest} (run: ${UPGRADE_HINT})`;
+}
 
 let timeoutCount = 0;
 
@@ -381,13 +466,19 @@ export default function (pi: ExtensionAPI) {
     // Argument completion gets no ctx, so stash the model query here.
     lastModels = ctx.models ?? lastModels;
     if (currentModel) {
-      ctx.ui?.notify?.(`🛡️ bash-gate ${VERSION_LABEL} active — classifier: ${currentModel}`, "info");
+      ctx.ui?.notify?.(`🛡️ bash-gate ${VERSION_LABEL} active — classifier: ${currentModel}${updateNote()}`, "info");
     } else {
       ctx.ui?.notify?.(
-        `🛡️ bash-gate ${VERSION_LABEL} active — no classifier model set, so ambiguous commands will prompt. Run /bash-gate to pick one.`,
+        `🛡️ bash-gate ${VERSION_LABEL} active — no classifier model set, so ambiguous commands will prompt. Run /bash-gate to pick one.${updateNote()}`,
         "warning",
       );
     }
+  });
+
+  // Check for a newer release as the session ends, so the next startup banner
+  // can report it without ever making startup wait on the network.
+  pi.on("session_shutdown", async () => {
+    await refreshUpdateCache(pi.logger ?? {});
   });
 
   pi.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext) => {
@@ -518,7 +609,8 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (arg === "off" || arg === "clear" || arg === "none") {
-        if (saveConfig({})) {
+        // Explicit undefined clears the key; `{}` would merge and keep it.
+        if (saveConfig({ model: undefined })) {
           currentModel = null;
           const envNote = process.env.BASH_GATE_MODEL
             ? ` (BASH_GATE_MODEL=${process.env.BASH_GATE_MODEL} will apply again on restart)`
