@@ -25,7 +25,7 @@ The blocklist runs **before** the allowlist, so a deterministic block can never 
 omp plugin install github:sinanawad/omp-bash-gate
 
 # or pin to a tag/commit so every machine provably runs the same code
-omp plugin install github:sinanawad/omp-bash-gate#v0.2.0
+omp plugin install github:sinanawad/omp-bash-gate#v0.3.0
 ```
 
 Neither form auto-updates: the resolved commit is held in a lockfile, so an install stays put until you explicitly re-run the install command (see [Updating](#updating)).
@@ -55,18 +55,33 @@ extensions:
 cp src/bash-gate.ts ~/.omp/agent/extensions/bash-gate.ts
 ```
 
-`<omp config dir>/extensions/` is scanned automatically, so no config change is needed. This works because omp rewrites the plugin's `@oh-my-pi/*` imports to its own copies — but it means the copied file **cannot be imported by plain `bun`/`node` outside omp**, so don't try to smoke-test it standalone. It also carries no version identity (it reports `v unpackaged` at startup) and has **no update path**. Prefer A or B.
-
-This is the least maintainable option — it carries no version identity and has **no update path** (see [Updating](#updating)). Prefer A or B.
+`<omp config dir>/extensions/` is scanned automatically, so no config change is needed. This works because omp rewrites the plugin's `@oh-my-pi/*` imports to its own copies — but it means the copied file **cannot be imported by plain `bun`/`node` outside omp**, so don't try to smoke-test it standalone. It also carries no version identity (the startup banner reads `unpackaged`) and has **no update path** (see [Updating](#updating)). Prefer A or B.
 
 ## Configuration
 
-Pick a classifier model with `/bash-gate`, or set `BASH_GATE_MODEL`. The model is an omp model spec resolved against your authenticated providers — any small model works. Reasoning is disabled automatically for the classifier call, so "thinking" models no longer waste their token budget on internal reasoning. Tested known-good picks:
+Pick a classifier model with `/bash-gate`, or set `BASH_GATE_MODEL`. The model is an omp model spec resolved against your own authenticated providers — any small model works, and your choice applies **immediately** (no restart).
 
-- `anthropic/claude-haiku-4.5` (cheap, fast, reliable)
-- `moonshotai/kimi-k2` (budget)
+Reasoning is always disabled for the classification call, so "thinking" models are perfectly fine here and any `:effort` suffix on the spec is not used.
 
-`/bash-gate` applies your choice **immediately** — no restart required.
+### The `/bash-gate` command
+
+| Form | What it does |
+|---|---|
+| `/bash-gate` | Open the picker (below). |
+| `/bash-gate <model-spec>` | Set the classifier directly, e.g. `/bash-gate @smol` or `/bash-gate anthropic/claude-haiku-4.5`. Rejected if the spec doesn't resolve for your providers. |
+| `/bash-gate status` | Show the version, current model, what it resolves to, and the config path. |
+| `/bash-gate off` | Clear the model — ambiguous commands go back to prompting. |
+
+Arguments tab-complete. The non-interactive forms also work with no UI, so a rollout can be scripted.
+
+The picker offers, in order:
+
+1. **`@smol` / `@tiny`** — whichever of your configured [omp model roles](https://github.com/can1357/oh-my-pi) resolve. These are already small/fast by definition and are correct for whatever provider *you* use, which usually makes them the best pick. Saved as the alias, so the gate follows the role if you later re-point it.
+2. **Example models** (`anthropic/claude-haiku-4.5`, `moonshotai/kimi-k2`) — shown **only if they resolve for you**. These are examples, not requirements; if you're on OpenAI or another provider they simply won't appear.
+3. **Browse all my models** — the full list of your authenticated models; type to filter.
+4. **Type a custom model id.**
+
+If none of the suggestions resolve, the picker says so and names the providers you *are* authenticated with, rather than silently showing an empty list.
 
 ### Environment variables
 
@@ -109,6 +124,8 @@ Then restart omp and confirm the version in the startup banner or `omp plugin li
 
 > Note: `omp plugin upgrade` operates on **marketplace** plugins. It will not update a plugin installed directly from a git URL — use the command above for that.
 
+**omp will not tell you when a new version exists.** There is no update check for git-installed plugins, so nothing will prompt you. Compare the version in the startup banner (or `/bash-gate status`) against the repo when you want to know if you're behind.
+
 - **Option B:** `git -C ~/repos/omp-bash-gate pull`, then restart omp.
 - **Option C:** no update path — re-copy the file manually.
 
@@ -116,16 +133,16 @@ Then restart omp and confirm the version in the startup banner or `omp plugin li
 
 1. **Tag a release** so everyone installs the same code:
    ```bash
-   git tag -a v0.2.0 -m "bash-gate v0.2.0"
-   git push origin v0.2.0
+   git tag -a v0.3.0 -m "bash-gate v0.3.0"
+   git push origin v0.3.0
    ```
 2. **Share one pinned install command** (so every machine provably runs the same code, and version moves are an explicit, reviewable step rather than "whatever `main` happened to be when each person installed"):
    ```bash
-   omp plugin install github:sinanawad/omp-bash-gate#v0.2.0
+   omp plugin install github:sinanawad/omp-bash-gate#v0.3.0
    ```
 3. **Have each person configure a classifier model** with `/bash-gate`. Each teammate uses whichever provider *they* have authenticated — there is no shared key and no required provider. Alternatively, standardise via env var: `export BASH_GATE_MODEL=anthropic/claude-haiku-4.5`.
 4. **Agree on the approval posture.** The safe default is to leave omp's native bash approval on (see below). If the team opts into `yolo` + `bash: allow`, make sure everyone knows to revert it if they ever remove the plugin.
-5. **Verify** after restart: the startup banner shows `🛡️ bash-gate v0.2.0 active — classifier: <model>`. Its absence means the gate is not loaded.
+5. **Verify** after restart: the startup banner shows `🛡️ bash-gate v0.3.0 active — classifier: <model>`. Its absence means the gate is not loaded.
 
 Private repos work the same way, as long as each machine's git credentials can clone the repo.
 

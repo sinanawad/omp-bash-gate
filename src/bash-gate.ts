@@ -64,6 +64,8 @@ function readVersion(): string {
 }
 
 const VERSION = readVersion();
+/** Display form: "v0.3.0", or just "unpackaged" for a bare single-file copy. */
+const VERSION_LABEL = VERSION === "unpackaged" ? "unpackaged" : `v${VERSION}`;
 
 // --- Configuration path (honors PI_CONFIG_DIR and OMP/PI profiles) ----------
 
@@ -308,9 +310,58 @@ async function promptOrBlock(
   return { block: true, reason: `Blocked: ${why} (no UI to confirm)` };
 }
 
-// Recommended small, reliable classifier models (shown only if they resolve
-// against the user's own authenticated providers). Any small model works.
-const RECOMMENDED_MODELS = ["anthropic/claude-haiku-4.5", "moonshotai/kimi-k2"];
+// --- /bash-gate command surface ---------------------------------------------
+
+/** omp model-role aliases that are already "small and fast" by definition, so
+ *  they make good classifiers and are correct for whatever provider the user
+ *  runs. Offered first, and only when the role resolves for them. */
+const SUGGESTED_ROLES: Array<{ alias: string; note: string }> = [
+  { alias: "@smol", note: "the model you configured as 'smol'" },
+  { alias: "@tiny", note: "the model you configured as 'tiny'" },
+];
+
+/** Concrete example models. Shown only when they resolve against the user's own
+ *  providers — an OpenAI-only user will not see OpenRouter ids. */
+const EXAMPLE_MODELS = ["anthropic/claude-haiku-4.5", "moonshotai/kimi-k2"];
+
+const BROWSE_OPTION = "── Browse all my models (type to filter) ──";
+const CUSTOM_OPTION = "── Type a custom model id ──";
+
+/** Structural mirror of pi-tui's AutocompleteItem, kept local so the plugin
+ *  needs no direct dependency on the TUI package. */
+type CompletionItem = { value: string; label: string; description?: string };
+
+type ModelQuery = ExtensionCommandContext["models"];
+type ModelLike = { id?: string; provider?: string };
+
+/** Last seen model query, captured from session/tool contexts so argument
+ *  completion (which receives no ctx) can still suggest the user's models. */
+let lastModels: ModelQuery | undefined;
+
+function modelSpec(m: ModelLike | undefined): string | undefined {
+  if (!m?.id) return undefined;
+  return m.provider ? `${m.provider}/${m.id}` : m.id;
+}
+
+/** Build the shortlist: resolvable small-role aliases first, then examples,
+ *  de-duplicated by the model each one actually resolves to. */
+function buildSuggestions(models: ModelQuery | undefined): Array<{ option: string; spec: string }> {
+  const out: Array<{ option: string; spec: string }> = [];
+  const seen = new Set<string>();
+  for (const role of SUGGESTED_ROLES) {
+    const resolved = modelSpec(models?.resolve?.(role.alias) as ModelLike | undefined);
+    if (!resolved || seen.has(resolved)) continue;
+    seen.add(resolved);
+    out.push({ option: `${role.alias} — ${role.note} (${resolved})`, spec: role.alias });
+  }
+  for (const spec of EXAMPLE_MODELS) {
+    const resolved = modelSpec(models?.resolve?.(spec) as ModelLike | undefined);
+    if (!resolved || seen.has(resolved)) continue;
+    seen.add(resolved);
+    out.push({ option: `${spec} — example`, spec });
+  }
+  return out;
+}
 
 export default function (pi: ExtensionAPI) {
   if (DEBUG) {
@@ -327,11 +378,13 @@ export default function (pi: ExtensionAPI) {
 
   // Unconditional liveness signal so the gate's absence is noticeable.
   pi.on("session_start", (_e, ctx) => {
+    // Argument completion gets no ctx, so stash the model query here.
+    lastModels = ctx.models ?? lastModels;
     if (currentModel) {
-      ctx.ui?.notify?.(`🛡️ bash-gate v${VERSION} active — classifier: ${currentModel}`, "info");
+      ctx.ui?.notify?.(`🛡️ bash-gate ${VERSION_LABEL} active — classifier: ${currentModel}`, "info");
     } else {
       ctx.ui?.notify?.(
-        `🛡️ bash-gate v${VERSION} active — no classifier model set, so ambiguous commands will prompt. Run /bash-gate to pick one.`,
+        `🛡️ bash-gate ${VERSION_LABEL} active — no classifier model set, so ambiguous commands will prompt. Run /bash-gate to pick one.`,
         "warning",
       );
     }
@@ -398,64 +451,155 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("bash-gate", {
-    description: "Configure the bash safety gate classifier model",
-    handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      if (!ctx.hasUI || !ctx.ui?.select) {
-        pi.logger?.info?.(`bash-gate: current model=${currentModel ?? "none"} (no UI to change)`);
-        return;
+    description:
+      "Configure the bash safety gate classifier model (<model-spec> | status | off)",
+    getArgumentCompletions: (argumentPrefix: string): CompletionItem[] => {
+      const items: CompletionItem[] = [
+        { value: "status", label: "status", description: "Show the current classifier model" },
+        { value: "off", label: "off", description: "Clear the model — ambiguous commands prompt" },
+      ];
+      for (const role of SUGGESTED_ROLES) {
+        const resolved = modelSpec(lastModels?.resolve?.(role.alias) as ModelLike | undefined);
+        if (resolved) {
+          items.push({ value: role.alias, label: role.alias, description: `${role.note} (${resolved})` });
+        }
       }
+      for (const m of (lastModels?.list?.() ?? []) as ModelLike[]) {
+        const spec = modelSpec(m);
+        if (spec) items.push({ value: spec, label: spec });
+      }
+      const prefix = argumentPrefix.trim().toLowerCase();
+      const matches = prefix
+        ? items.filter((i) => i.value.toLowerCase().includes(prefix))
+        : items;
+      return matches.slice(0, 25);
+    },
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
+      lastModels = ctx.models ?? lastModels;
+
+      /** Report to the UI when there is one, and always to the log. */
+      const say = (message: string, type: "info" | "error" = "info"): void => {
+        ctx.ui?.notify?.(`bash-gate: ${message}`, type);
+        if (type === "error") pi.logger?.warn?.(`bash-gate: ${message}`);
+        else pi.logger?.info?.(`bash-gate: ${message}`);
+      };
 
       const applyModel = (modelId: string): void => {
         if (saveConfig({ model: modelId })) {
           currentModel = modelId;
-          ctx.ui?.notify?.(`bash-gate: classifier model set to ${modelId}`, "info");
-          pi.logger?.info?.(`bash-gate: model changed to ${modelId}`);
+          say(`classifier model set to ${modelId}`);
         } else {
-          ctx.ui?.notify?.(
-            `bash-gate: could not save config to ${STATE_FILE} — model not changed`,
-            "error",
-          );
+          say(`could not save config to ${STATE_FILE} — model not changed`, "error");
         }
       };
 
-      const promptCustom = async (): Promise<void> => {
-        const custom = await ctx.ui?.input?.(
-          "bash-gate: enter an omp model spec",
-          "e.g. anthropic/claude-haiku-4.5",
-        );
-        const spec = custom?.trim();
-        if (!spec) return;
-        if (!ctx.models?.resolve?.(spec)) {
-          ctx.ui?.notify?.(
-            `bash-gate: "${spec}" does not resolve against your authenticated models — not saved`,
-            "error",
-          );
+      /** Validate against the user's own providers before persisting. */
+      const applyIfResolvable = (spec: string): void => {
+        const resolved = modelSpec(ctx.models?.resolve?.(spec) as ModelLike | undefined);
+        if (!resolved) {
+          say(`"${spec}" does not resolve against your authenticated models — not saved`, "error");
           return;
         }
         applyModel(spec);
       };
 
-      // Show recommended models only if they actually resolve for this user
-      // (works across every provider, not just OpenRouter).
-      const recommended = RECOMMENDED_MODELS.filter((m) => ctx.models?.resolve?.(m));
-      const CUSTOM = "── Type a custom model id ──";
-      const options = [...recommended, CUSTOM];
+      const arg = args.trim();
 
-      if (recommended.length === 0) {
-        await promptCustom();
+      // Non-interactive forms; these also work headlessly (scripted rollouts).
+      if (arg === "status") {
+        const resolved = currentModel
+          ? (modelSpec(ctx.models?.resolve?.(currentModel) as ModelLike | undefined) ??
+            "does not resolve for your providers")
+          : "—";
+        say(
+          `${VERSION_LABEL} | model: ${currentModel ?? "none (ambiguous commands prompt)"} | resolves to: ${resolved} | reasoning: always disabled | config: ${STATE_FILE}`,
+        );
         return;
       }
 
+      if (arg === "off" || arg === "clear" || arg === "none") {
+        if (saveConfig({})) {
+          currentModel = null;
+          const envNote = process.env.BASH_GATE_MODEL
+            ? ` (BASH_GATE_MODEL=${process.env.BASH_GATE_MODEL} will apply again on restart)`
+            : "";
+          say(`classifier cleared — ambiguous commands will prompt${envNote}`);
+        } else {
+          say(`could not save config to ${STATE_FILE} — model not changed`, "error");
+        }
+        return;
+      }
+
+      if (arg) {
+        applyIfResolvable(arg);
+        return;
+      }
+
+      // Interactive picker.
+      if (!ctx.hasUI || !ctx.ui?.select) {
+        pi.logger?.info?.(
+          `bash-gate: current model=${currentModel ?? "none"} (no UI — use "/bash-gate <model-spec>")`,
+        );
+        return;
+      }
+
+      const promptCustom = async (): Promise<void> => {
+        const custom = await ctx.ui?.input?.(
+          "bash-gate: enter an omp model spec",
+          "e.g. @smol, anthropic/claude-haiku-4.5",
+        );
+        const spec = custom?.trim();
+        if (spec) applyIfResolvable(spec);
+      };
+
+      const browseAll = async (): Promise<void> => {
+        const specs = ((ctx.models?.list?.() ?? []) as ModelLike[])
+          .map(modelSpec)
+          .filter((s): s is string => Boolean(s))
+          .sort();
+        if (specs.length === 0) {
+          say("you have no authenticated models — run `omp auth login <provider>` first", "error");
+          return;
+        }
+        const picked = await ctx.ui?.select?.(
+          `bash-gate: ${specs.length} models — type to filter`,
+          specs,
+        );
+        if (picked) applyModel(picked);
+      };
+
+      const suggestions = buildSuggestions(ctx.models);
+      if (suggestions.length === 0) {
+        const providers = [
+          ...new Set(
+            ((ctx.models?.list?.() ?? []) as ModelLike[])
+              .map((m) => m.provider)
+              .filter((p): p is string => Boolean(p)),
+          ),
+        ];
+        say(
+          providers.length
+            ? `no suggested models are available for your providers (${providers.join(", ")}) — pick one of your own models or type an id`
+            : "you have no authenticated models — run `omp auth login <provider>` first",
+        );
+      }
+
+      const options = [...suggestions.map((s) => s.option), BROWSE_OPTION, CUSTOM_OPTION];
       const selected = await ctx.ui.select(
-        `bash-gate: choose classifier model (current: ${currentModel ?? "none"})`,
+        `bash-gate: choose classifier model (current: ${currentModel ?? "none"}) — reasoning is always disabled for this call, so "thinking" models are fine`,
         options,
       );
       if (!selected) return;
-      if (selected === CUSTOM) {
+      if (selected === CUSTOM_OPTION) {
         await promptCustom();
         return;
       }
-      applyModel(selected);
+      if (selected === BROWSE_OPTION) {
+        await browseAll();
+        return;
+      }
+      const hit = suggestions.find((s) => s.option === selected);
+      if (hit) applyModel(hit.spec);
     },
   });
 }

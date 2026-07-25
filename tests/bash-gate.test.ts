@@ -512,3 +512,130 @@ describe("/bash-gate command", () => {
     expect(completeCalls.length).toBe(1);
   });
 });
+
+// --- /bash-gate arguments and picker contents --------------------------------
+
+/** Command ctx whose resolve() only knows the given specs. */
+function makeCmdCtx(opts: {
+  known?: string[];
+  list?: Array<{ id: string; provider: string }>;
+  select?: (title: string, options: string[]) => Promise<string | null>;
+  input?: () => Promise<string | null>;
+  hasUI?: boolean;
+}) {
+  const notifies: Notify[] = [];
+  const titles: string[] = [];
+  const offered: string[][] = [];
+  const known = new Set(opts.known ?? []);
+  const ctx = {
+    hasUI: opts.hasUI ?? true,
+    ui: {
+      notify: (msg: string, type: string) => notifies.push({ msg, type }),
+      select: async (title: string, options: string[]) => {
+        titles.push(title);
+        offered.push(options);
+        return opts.select ? await opts.select(title, options) : null;
+      },
+      input: async () => (opts.input ? await opts.input() : null),
+    },
+    models: {
+      resolve: (spec: string) =>
+        known.has(spec) ? { id: spec.replace(/^@/, "resolved-"), provider: "test" } : undefined,
+      list: () => opts.list ?? [],
+    },
+  };
+  return { ctx, notifies, titles, offered };
+}
+
+describe("/bash-gate arguments", () => {
+  it("status reports version, model and config path (works headless)", async () => {
+    const { commands } = await loadPlugin("test-model");
+    const { ctx, notifies } = makeCmdCtx({ known: ["test-model"], hasUI: false });
+    await commands["bash-gate"].handler("status", ctx);
+    const msg = notifies.map((n) => n.msg).join(" ");
+    expect(msg).toContain("model: test-model");
+    expect(msg).toContain("reasoning: always disabled");
+    expect(msg).toMatch(/v\d+\.\d+\.\d+|unpackaged/);
+  });
+
+  it("<spec> sets the model directly without a picker", async () => {
+    const { commands } = await loadPlugin(null);
+    const { ctx, notifies, offered } = makeCmdCtx({ known: ["@smol"], hasUI: false });
+    await commands["bash-gate"].handler("@smol", ctx);
+    expect(notifies.some((n) => n.msg.includes("set to @smol"))).toBe(true);
+    expect(offered.length).toBe(0); // no picker was shown
+  });
+
+  it("rejects a spec that does not resolve", async () => {
+    const { commands } = await loadPlugin(null);
+    const { ctx, notifies } = makeCmdCtx({ known: [], hasUI: false });
+    await commands["bash-gate"].handler("nope/nope", ctx);
+    expect(notifies.some((n) => n.type === "error" && n.msg.includes("does not resolve"))).toBe(true);
+  });
+
+  it("off clears the model so ambiguous commands prompt again", async () => {
+    const { commands, handlers } = await loadPlugin("test-model");
+    const { ctx, notifies } = makeCmdCtx({ known: ["test-model"], hasUI: false });
+    await commands["bash-gate"].handler("off", ctx);
+    expect(notifies.some((n) => n.msg.includes("cleared"))).toBe(true);
+
+    const { ctx: runCtx, state } = makeCtx({ confirm: true });
+    const res = await handlers.tool_call(bash("npm install"), runCtx);
+    expect(completeCalls.length).toBe(0); // no classifier call
+    expect(state.confirmCalls).toBe(1); // prompted instead
+    expect(res).toBeUndefined();
+  });
+
+  it("argument completion offers subcommands and the user's models", async () => {
+    const { commands, handlers } = await loadPlugin("test-model");
+    // session_start populates the model query used by completions
+    handlers.session_start({}, makeCmdCtx({ known: ["@smol"], list: [{ id: "gpt-x", provider: "openai" }] }).ctx);
+    const all = commands["bash-gate"].getArgumentCompletions("");
+    expect(all.map((i: { value: string }) => i.value)).toContain("status");
+    expect(all.map((i: { value: string }) => i.value)).toContain("off");
+    expect(all.map((i: { value: string }) => i.value)).toContain("openai/gpt-x");
+    const filtered = commands["bash-gate"].getArgumentCompletions("stat");
+    expect(filtered.every((i: { value: string }) => i.value.includes("stat"))).toBe(true);
+  });
+});
+
+describe("/bash-gate picker", () => {
+  it("offers @smol first, labeled as the user's configured role", async () => {
+    const { commands } = await loadPlugin(null);
+    const { ctx, offered, titles } = makeCmdCtx({ known: ["@smol", "anthropic/claude-haiku-4.5"] });
+    await commands["bash-gate"].handler("", ctx);
+    expect(offered[0][0]).toContain("@smol");
+    expect(offered[0][0]).toContain("configured as 'smol'");
+    // and the picker states the reasoning policy
+    expect(titles[0]).toContain("reasoning is always disabled");
+  });
+
+  it("hides suggestions that do not resolve, and explains when none do", async () => {
+    const { commands } = await loadPlugin(null);
+    const { ctx, notifies, offered } = makeCmdCtx({
+      known: [],
+      list: [{ id: "gpt-x", provider: "openai" }],
+    });
+    await commands["bash-gate"].handler("", ctx);
+    expect(notifies.some((n) => n.msg.includes("openai"))).toBe(true);
+    // only Browse + Custom remain
+    expect(offered[0].length).toBe(2);
+    expect(offered[0].every((o: string) => o.startsWith("──"))).toBe(true);
+  });
+
+  it("browse-all lists the user's models and applies the pick", async () => {
+    const { commands } = await loadPlugin(null);
+    const { ctx, notifies, offered } = makeCmdCtx({
+      known: [],
+      list: [
+        { id: "b-model", provider: "openai" },
+        { id: "a-model", provider: "anthropic" },
+      ],
+      select: async (_t, options) => options.find((o) => o.startsWith("── Browse")) ?? options[0],
+    });
+    await commands["bash-gate"].handler("", ctx);
+    // second select call listed the concrete models, sorted
+    expect(offered[1]).toEqual(["anthropic/a-model", "openai/b-model"]);
+    expect(notifies.some((n) => n.msg.includes("set to anthropic/a-model"))).toBe(true);
+  });
+});

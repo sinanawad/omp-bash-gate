@@ -1,6 +1,6 @@
 {
   "name": "omp-bash-gate",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Model-assisted bash command safety gate for Oh My Pi (omp)",
   "type": "module",
   "license": "MIT",
