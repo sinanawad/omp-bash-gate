@@ -10,12 +10,12 @@
   "plugins": [
     {
       "name": "bash-gate",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "description": "Model-assisted bash command safety gate: instant block/allow lists plus classification through your own omp provider.",
       "source": {
         "source": "github",
         "repo": "sinanawad/omp-bash-gate",
-        "ref": "v0.4.0"
+        "ref": "v0.4.1"
       },
       "author": {
         "name": "Sinan"
@@ -24,7 +24,12 @@
       "repository": "https://github.com/sinanawad/omp-bash-gate",
       "license": "MIT",
       "category": "security",
-      "keywords": ["security", "approval", "bash", "classifier"]
+      "keywords": [
+        "security",
+        "approval",
+        "bash",
+        "classifier"
+      ]
     }
   ]
 }

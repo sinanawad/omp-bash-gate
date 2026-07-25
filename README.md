@@ -23,9 +23,11 @@ The blocklist runs **before** the allowlist, so a deterministic block can never 
 Add the marketplace once, then install from it:
 
 ```bash
-omp plugin marketplace add github:sinanawad/omp-bash-gate
+omp plugin marketplace add sinanawad/omp-bash-gate
 omp plugin install bash-gate@sinanawad
 ```
+
+Note the marketplace source is the bare `owner/repo` form — a `github:` prefix is rejected here (unlike `omp plugin install`, which does accept it).
 
 Why this one for a team: omp checks marketplace plugins for updates at startup (non-blocking). With `marketplace.autoUpdate: auto` in `~/.omp/agent/config.yml`, teammates are upgraded **automatically** when a new version is published — no one has to re-run anything. `omp plugin upgrade` also works for marketplace plugins (it does nothing for direct git installs).
 
