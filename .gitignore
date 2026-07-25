@@ -1,3 +1,9 @@
 node_modules/
 *.log
 .DS_Store
+
+# Local agent tooling state (oh-my-claudecode)
+.omc/
+
+# Packed tarballs from `bun pm pack`
+*.tgz
