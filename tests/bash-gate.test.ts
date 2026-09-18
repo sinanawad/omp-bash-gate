@@ -311,6 +311,142 @@ describe("tier 3 — model verdicts", () => {
   });
 });
 
+// --- Tier 3: Jev/TypeSafe decisions-endpoint path -----------------------------
+
+describe("tier 3 — Jev decisions endpoint", () => {
+  let fetchCalls: Array<{ url: string; init: any }> = [];
+  let fetchQueue: Array<() => Promise<any>> = [];
+  const originalFetch = globalThis.fetch;
+
+  const decisionsOk = (choice: string, confidence: number, probabilities: Record<string, number>) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      model: "typesafe/jev-1.13-20260917",
+      answers: { verdict: { type: "choice", choice, probabilities, confidence } },
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }),
+  });
+
+  beforeEach(() => {
+    fetchCalls = [];
+    fetchQueue = [];
+    globalThis.fetch = ((url: string, init: any) => {
+      fetchCalls.push({ url, init });
+      const next = fetchQueue.shift();
+      return next ? next() : Promise.resolve(decisionsOk("safe", 1, { safe: 1, risky: 0, dangerous: 0 }));
+    }) as any;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  /** makeCtx's model factory returns `{id: spec, ...}` with no explicit
+   *  baseUrl — resolve to a Jev model id so isJevModel() routes here. */
+  const jevCtx = (opts: Parameters<typeof makeCtx>[0] = {}) => {
+    const built = makeCtx(opts);
+    built.ctx.models.resolve = (_spec: string) => ({
+      id: "typesafe/jev-1.13",
+      provider: "openrouter",
+      api: "openai-completions",
+    });
+    return built;
+  };
+
+  it("posts to the decisions endpoint, not chat/completions, with the origin-only URL", async () => {
+    const { handlers } = await loadPlugin("typesafe/jev-1.13");
+    const { ctx } = jevCtx();
+    await handlers.tool_call(bash("npm install"), ctx);
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toBe("https://openrouter.ai/api/alpha/decisions");
+    expect(completeCalls.length).toBe(0); // never falls through to the chat-completions path
+    const body = JSON.parse(fetchCalls[0].init.body);
+    expect(body.questions.verdict.type).toBe("choice");
+    expect(Object.keys(body.questions.verdict.criteria)).toEqual(["safe", "risky", "dangerous"]);
+  });
+
+  it("high-confidence safe → allow", async () => {
+    fetchQueue = [() => Promise.resolve(decisionsOk("safe", 0.95, { safe: 0.95, risky: 0.03, dangerous: 0.02 }))];
+    const { handlers } = await loadPlugin("typesafe/jev-1.13");
+    const { ctx, state } = jevCtx();
+    const res = await handlers.tool_call(bash("npm install"), ctx);
+    expect(res).toBeUndefined();
+    expect(state.confirmCalls).toBe(0);
+  });
+
+  it("low-confidence safe is downgraded to risky, not trusted as an allow", async () => {
+    // Mirrors the real rmtree('/tmp/nonexistent') response observed against
+    // the live API: a near-coin-flip "safe" plurality must not silently allow.
+    fetchQueue = [
+      () => Promise.resolve(decisionsOk("safe", 0.39, { safe: 0.59, dangerous: 0.23, risky: 0.18 })),
+    ];
+    const { handlers } = await loadPlugin("typesafe/jev-1.13");
+    const { ctx, state } = jevCtx({ confirm: true });
+    const res = await handlers.tool_call(bash("npm install"), ctx);
+    expect(res).toBeUndefined(); // confirmed risky, user approved
+    expect(state.confirmCalls).toBe(1); // prompted — not a silent allow
+  });
+
+  it("low-confidence safe + headless → block (fail-closed, same as an ordinary risky)", async () => {
+    fetchQueue = [() => Promise.resolve(decisionsOk("safe", 0.4, { safe: 0.4, risky: 0.35, dangerous: 0.25 }))];
+    const { handlers } = await loadPlugin("typesafe/jev-1.13");
+    const { ctx, state } = jevCtx({ hasUI: false });
+    const res = await handlers.tool_call(bash("npm install"), ctx);
+    expect(res?.block).toBe(true);
+    expect(state.confirmCalls).toBe(0);
+  });
+
+  it("dangerous → block, regardless of confidence", async () => {
+    fetchQueue = [() => Promise.resolve(decisionsOk("dangerous", 0.99, { dangerous: 0.99, risky: 0.01, safe: 0 }))];
+    const { handlers } = await loadPlugin("typesafe/jev-1.13");
+    const { ctx, state } = jevCtx();
+    const res = await handlers.tool_call(bash("npm install"), ctx);
+    expect(res).toEqual({ block: true, reason: "Blocked by model: classified as dangerous" });
+    expect(state.confirmCalls).toBe(0);
+  });
+
+  it("risky choice + UI approve → allow", async () => {
+    fetchQueue = [() => Promise.resolve(decisionsOk("risky", 0.9, { risky: 0.9, safe: 0.07, dangerous: 0.03 }))];
+    const { handlers } = await loadPlugin("typesafe/jev-1.13");
+    const { ctx, state } = jevCtx({ confirm: true });
+    const res = await handlers.tool_call(bash("npm install"), ctx);
+    expect(res).toBeUndefined();
+    expect(state.confirmCalls).toBe(1);
+  });
+
+  it("HTTP error from the decisions endpoint fails closed (retry then prompt/block)", async () => {
+    fetchQueue = [
+      () => Promise.resolve({ ok: false, status: 500, text: async () => "server error" }),
+      () => Promise.resolve({ ok: false, status: 500, text: async () => "server error" }),
+    ];
+    const { handlers } = await loadPlugin("typesafe/jev-1.13");
+    const { ctx } = jevCtx({ hasUI: false });
+    const res = await handlers.tool_call(bash("npm install"), ctx);
+    expect(res?.block).toBe(true);
+    expect(fetchCalls.length).toBe(2); // one retry, matching the text-classifier fail-closed contract
+  });
+
+  it("malformed decisions response (no answers.verdict) fails closed", async () => {
+    fetchQueue = [
+      () => Promise.resolve({ ok: true, status: 200, json: async () => ({ answers: {} }) }),
+      () => Promise.resolve({ ok: true, status: 200, json: async () => ({ answers: {} }) }),
+    ];
+    const { handlers } = await loadPlugin("typesafe/jev-1.13");
+    const { ctx } = jevCtx({ hasUI: false });
+    const res = await handlers.tool_call(bash("npm install"), ctx);
+    expect(res?.block).toBe(true);
+  });
+
+  it("missing API key fails closed without making a network call", async () => {
+    const { handlers } = await loadPlugin("typesafe/jev-1.13");
+    const { ctx } = jevCtx({ hasUI: false });
+    ctx.modelRegistry.resolver = (_m: any) => undefined as any;
+    const res = await handlers.tool_call(bash("npm install"), ctx);
+    expect(res?.block).toBe(true);
+    expect(fetchCalls.length).toBe(0);
+  });
+});
+
 // --- Response parsing (fail toward caution) ----------------------------------
 
 describe("verdict parsing", () => {

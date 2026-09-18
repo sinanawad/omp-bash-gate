@@ -115,6 +115,31 @@ The picker offers, in order:
 
 If none of the suggestions resolve, the picker says so and names the providers you *are* authenticated with, rather than silently showing an empty list.
 
+### Jev / TypeSafe fast-path (optional)
+
+If you set `/bash-gate typesafe/jev-1.13` (or `typesafe/jev-latest`, if your
+provider exposes it) and your provider routes it through OpenRouter, tier 3
+bypasses the usual chat-completions classifier entirely. TypeSafe's Jev is a
+*decisions* model — OpenRouter rejects it on `chat/completions` outright — so
+the gate detects the `typesafe/jev*` id and calls OpenRouter's dedicated
+`/api/alpha/decisions` endpoint instead, sending a typed `{safe, risky,
+dangerous}` choice question and getting back a guaranteed-schema verdict with
+a calibrated confidence score and per-label probabilities, typically in
+70–500ms at roughly $0.04/M input tokens and $0 output tokens.
+
+This changes one thing about the verdict logic: a `safe` choice below 80%
+confidence is **not** trusted as an outright allow — it is treated as `risky`
+(prompt with UI, block headless) instead. An unconfident "probably safe" is
+not the same claim as a confident one, and Jev is the only backend here that
+reports a calibrated number worth gating on — an ordinary chat model's
+self-reported confidence would be uncalibrated noise, so this threshold does
+not apply to (and is not requested from) the standard text-classifier path.
+
+No separate setting is needed to enable this — picking a `typesafe/jev-*`
+model *is* the opt-in. Everything else (blocklist, allowlist, retry-then-
+fail-closed, redaction, the nonce-fenced untrusted-data framing) behaves
+identically to the standard path.
+
 ### Environment variables
 
 | Variable | Default | Description |
