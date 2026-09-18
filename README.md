@@ -140,6 +140,23 @@ model *is* the opt-in. Everything else (blocklist, allowlist, retry-then-
 fail-closed, redaction, the nonce-fenced untrusted-data framing) behaves
 identically to the standard path.
 
+**Setup note:** Jev never appears in `omp models` or the `/bash-gate` picker's
+"browse all my models" list — OpenRouter's own model-listing endpoint omits
+decisions models entirely, so omp's catalog (built from that same listing)
+has nothing to discover, however recently you refresh it. This is permanent,
+not staleness. The gate works around it by recognizing the `typesafe/jev-*`
+spec directly and cloning connection details (base URL, auth) from any
+already-authenticated OpenRouter model in your session — so the only real
+requirement is that you have *some* OpenRouter credential, not that Jev
+itself resolves anywhere. Set it explicitly:
+
+```
+/bash-gate typesafe/jev-1.13
+```
+
+A plain model id typo (`typesafe/jevv`) or having no OpenRouter credential
+at all still fails clearly, telling you which one is missing.
+
 ### Environment variables
 
 | Variable | Default | Description |

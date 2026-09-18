@@ -349,11 +349,51 @@ const SYSTEM_PROMPT = [
 /** TypeSafe's Jev ("decisions") models reject the chat/completions endpoint
  *  outright — they only speak OpenRouter's `/api/alpha/decisions` schema
  *  (`{state, questions}` in, typed choice + calibrated probabilities out).
- *  Detected by model id so routing needs no separate user-facing setting:
- *  picking a `typesafe/jev-*` model from /bash-gate is enough to switch
- *  transports. */
-function isJevModel(model: Model): boolean {
-  return /^typesafe\/jev(-|$)/.test(model.id);
+ *
+ *  Jev cannot be discovered through `ctx.models.resolve()`/`ctx.models.list()`
+ *  at all: OpenRouter's own model-listing endpoints omit decisions models
+ *  entirely (verified against the live catalog), so omp's registry — built
+ *  from that same listing — never contains a `typesafe/jev*` entry to
+ *  resolve, however fresh. This is a permanent gap, not staleness fixable
+ *  by a refresh. Detection therefore happens on the raw spec *string*
+ *  before any resolve attempt, and the request is built from a synthesized
+ *  model object (see `resolveJevModel`) rather than a catalog lookup. */
+const JEV_SPEC_PATTERN = /^(?:openrouter\/)?typesafe\/jev(?:-[\w.]+)?$/;
+
+function isJevSpec(spec: string): boolean {
+  return JEV_SPEC_PATTERN.test(spec);
+}
+
+/** Build a `Model` for a Jev spec without a catalog entry to resolve against.
+ *  Connection metadata (`baseUrl`, `provider`, `api`, `headers`) is cloned
+ *  from any already-resolvable OpenRouter model in the user's own session —
+ *  respecting a custom OpenRouter proxy/base URL if they have one configured
+ *  — with only `id`/`name`/pricing/`contextWindow` swapped to Jev's. Returns
+ *  `undefined` if the user has no OpenRouter-routed model to clone from
+ *  (i.e. no OpenRouter credential), which is the only real prerequisite. */
+function resolveJevModel(ctx: ExtensionContext, spec: string): Model | undefined {
+  const match = /typesafe\/(jev(?:-[\w.]+)?)$/.exec(spec);
+  if (!match) return undefined;
+  const jevId = `typesafe/${match[1]}`;
+
+  const template = ctx.models
+    ?.list?.()
+    ?.find((m) => (m as Model).provider === "openrouter") as Model | undefined;
+  if (!template) return undefined;
+
+  return {
+    ...template,
+    id: jevId,
+    requestModelId: undefined,
+    name: "TypeSafe: Jev",
+    reasoning: false,
+    input: ["text"],
+    // $0.042/M input, $0/M output per OpenRouter's live catalog — informational
+    // only here; the decisions endpoint bills independently of these fields.
+    cost: { input: 0.042, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 32000,
+    maxTokens: 28800,
+  };
 }
 
 /** Minimum confidence for Jev's "safe" choice to be trusted as an outright
@@ -445,6 +485,26 @@ async function classifyWithModel(
   const spec = currentModel;
   if (!spec) return null;
 
+  // Jev has no catalog entry to resolve — check the spec string first and
+  // synthesize a model rather than going through the normal resolve path.
+  if (isJevSpec(spec)) {
+    const model = resolveJevModel(ctx, spec);
+    if (!model) {
+      logger.warn?.(`bash-gate: "${spec}" needs an OpenRouter-routed model in your session to clone connection settings from — run /bash-gate`);
+      return null;
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      return await classifyWithJev(ctx, logger, model, command, ctrl.signal);
+    } catch (e) {
+      logger.warn?.(`bash-gate: classifier threw: ${String(e)}`);
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   const model = ctx.models?.resolve?.(spec) as Model | undefined;
   if (!model) {
     logger.warn?.(`bash-gate: model "${spec}" did not resolve — run /bash-gate`);
@@ -454,8 +514,6 @@ async function classifyWithModel(
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
   try {
-    if (isJevModel(model)) return await classifyWithJev(ctx, logger, model, command, ctrl.signal);
-
     const nonce = randomBytes(6).toString("hex");
     const payload = redactSecrets(command.slice(0, MAX_COMMAND_CHARS));
     const userContent = `<<<CMD ${nonce}>>>\n${payload}\n<<<END ${nonce}>>>`;
@@ -712,6 +770,17 @@ export default function (pi: ExtensionAPI) {
 
       /** Validate against the user's own providers before persisting. */
       const applyIfResolvable = (spec: string): void => {
+        if (isJevSpec(spec)) {
+          if (!resolveJevModel(ctx, spec)) {
+            say(
+              `"${spec}" needs an OpenRouter-routed model in your session to clone connection settings from — authenticate with OpenRouter first`,
+              "error",
+            );
+            return;
+          }
+          applyModel(spec);
+          return;
+        }
         const resolved = modelSpec(ctx.models?.resolve?.(spec) as ModelLike | undefined);
         if (!resolved) {
           say(`"${spec}" does not resolve against your authenticated models — not saved`, "error");
@@ -764,8 +833,12 @@ export default function (pi: ExtensionAPI) {
       // Non-interactive forms; these also work headlessly (scripted rollouts).
       if (arg === "status") {
         const resolved = currentModel
-          ? (modelSpec(ctx.models?.resolve?.(currentModel) as ModelLike | undefined) ??
-            "does not resolve for your providers")
+          ? currentModel && isJevSpec(currentModel)
+            ? resolveJevModel(ctx, currentModel)
+              ? `${currentModel} (via OpenRouter decisions endpoint — not a catalog model)`
+              : "needs an OpenRouter-routed model in your session to clone connection settings from"
+            : (modelSpec(ctx.models?.resolve?.(currentModel) as ModelLike | undefined) ??
+              "does not resolve for your providers")
           : "—";
         say(
           `${VERSION_LABEL} | model: ${currentModel ?? "none (ambiguous commands prompt)"} | resolves to: ${resolved} | reasoning: always disabled | config: ${STATE_FILE}`,

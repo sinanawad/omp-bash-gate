@@ -109,6 +109,11 @@ function makeCtx(opts: { hasUI?: boolean; confirm?: boolean; resolves?: boolean 
   const notifies: Notify[] = [];
   const statuses: Array<string | undefined> = [];
   const state = { confirmCalls: 0, selectCalls: 0, inputCalls: 0 };
+  const models: { resolve: (spec: string) => any; list: () => any[] } = {
+    resolve: (spec: string) =>
+      opts.resolves === false ? undefined : { id: spec, provider: "test", api: "openai-completions" },
+    list: () => [],
+  };
   const ctx = {
     hasUI: opts.hasUI ?? true,
     ui: {
@@ -127,10 +132,7 @@ function makeCtx(opts: { hasUI?: boolean; confirm?: boolean; resolves?: boolean 
         return null;
       },
     },
-    models: {
-      resolve: (spec: string) =>
-        opts.resolves === false ? undefined : { id: spec, provider: "test", api: "openai-completions" },
-    },
+    models,
     modelRegistry: { resolver: (_m: any) => "RESOLVER" },
   };
   return { ctx, notifies, statuses, state };
@@ -341,15 +343,25 @@ describe("tier 3 — Jev decisions endpoint", () => {
     globalThis.fetch = originalFetch;
   });
 
-  /** makeCtx's model factory returns `{id: spec, ...}` with no explicit
-   *  baseUrl — resolve to a Jev model id so isJevModel() routes here. */
+  /** `resolveJevModel` clones connection metadata from any resolvable
+   *  OpenRouter model via `ctx.models.list()` — it never calls `resolve()`
+   *  for a Jev spec, since Jev has no catalog entry to resolve against. */
   const jevCtx = (opts: Parameters<typeof makeCtx>[0] = {}) => {
     const built = makeCtx(opts);
-    built.ctx.models.resolve = (_spec: string) => ({
-      id: "typesafe/jev-1.13",
-      provider: "openrouter",
-      api: "openai-completions",
-    });
+    built.ctx.models.list = () => [
+      {
+        id: "some-openrouter-model",
+        provider: "openrouter",
+        api: "openai-completions",
+        baseUrl: "https://openrouter.ai/api/v1",
+        name: "Some Model",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 128000,
+        maxTokens: 8192,
+      },
+    ];
     return built;
   };
 
@@ -437,7 +449,16 @@ describe("tier 3 — Jev decisions endpoint", () => {
     expect(res?.block).toBe(true);
   });
 
-  it("missing API key fails closed without making a network call", async () => {
+  it("no OpenRouter model available to clone from fails closed without a network call", async () => {
+    const { handlers } = await loadPlugin("typesafe/jev-1.13");
+    const { ctx } = jevCtx({ hasUI: false });
+    ctx.models.list = () => []; // no OpenRouter-routed model in this session
+    const res = await handlers.tool_call(bash("npm install"), ctx);
+    expect(res?.block).toBe(true);
+    expect(fetchCalls.length).toBe(0);
+  });
+
+  it("no API key resolved fails closed without a network call", async () => {
     const { handlers } = await loadPlugin("typesafe/jev-1.13");
     const { ctx } = jevCtx({ hasUI: false });
     ctx.modelRegistry.resolver = (_m: any) => undefined as any;
