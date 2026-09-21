@@ -154,8 +154,13 @@ itself resolves anywhere. Set it explicitly:
 /bash-gate typesafe/jev-1.13
 ```
 
-A plain model id typo (`typesafe/jevv`) or having no OpenRouter credential
-at all still fails clearly, telling you which one is missing.
+A bare `typesafe/jev-latest` id 400s on OpenRouter's decisions endpoint
+directly ("Model typesafe/jev-latest does not exist" — verified against the
+live API); the gate rewrites it on the wire to the working `~typesafe/jev-
+latest` alias form automatically, so `/bash-gate typesafe/jev-latest` works
+correctly despite that quirk. A bare `typesafe/jev` with no version or
+`-latest` suffix at all is rejected outright (also 400s live) — always
+include a version (`jev-1.13`) or `-latest`.
 
 ### Environment variables
 

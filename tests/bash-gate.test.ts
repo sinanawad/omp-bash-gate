@@ -466,6 +466,24 @@ describe("tier 3 — Jev decisions endpoint", () => {
     expect(res?.block).toBe(true);
     expect(fetchCalls.length).toBe(0);
   });
+
+  it("jev-latest is sent on the wire as ~typesafe/jev-latest (bare id 400s on the real API)", async () => {
+    const { handlers } = await loadPlugin("typesafe/jev-latest");
+    const { ctx } = jevCtx();
+    await handlers.tool_call(bash("npm install"), ctx);
+    expect(fetchCalls.length).toBe(1);
+    const body = JSON.parse(fetchCalls[0].init.body);
+    expect(body.model).toBe("~typesafe/jev-latest");
+  });
+
+  it("bare typesafe/jev with no version/latest suffix is not treated as a Jev spec", async () => {
+    const { handlers } = await loadPlugin("typesafe/jev");
+    const { ctx } = jevCtx({ hasUI: false });
+    ctx.models.resolve = (_spec: string) => undefined; // no catalog entry either — realistic
+    const res = await handlers.tool_call(bash("npm install"), ctx);
+    expect(res?.block).toBe(true);
+    expect(fetchCalls.length).toBe(0); // never treated as Jev, never hits the decisions endpoint
+  });
 });
 
 // --- Response parsing (fail toward caution) ----------------------------------

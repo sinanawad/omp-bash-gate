@@ -358,7 +358,9 @@ const SYSTEM_PROMPT = [
  *  by a refresh. Detection therefore happens on the raw spec *string*
  *  before any resolve attempt, and the request is built from a synthesized
  *  model object (see `resolveJevModel`) rather than a catalog lookup. */
-const JEV_SPEC_PATTERN = /^(?:openrouter\/)?typesafe\/jev(?:-[\w.]+)?$/;
+/** Bare `typesafe/jev` (no suffix) 400s on the decisions endpoint — a
+ *  version or `-latest` is required. */
+const JEV_SPEC_PATTERN = /^(?:openrouter\/)?typesafe\/jev-[\w.]+$/;
 
 function isJevSpec(spec: string): boolean {
   return JEV_SPEC_PATTERN.test(spec);
@@ -368,11 +370,12 @@ function isJevSpec(spec: string): boolean {
  *  Connection metadata (`baseUrl`, `provider`, `api`, `headers`) is cloned
  *  from any already-resolvable OpenRouter model in the user's own session —
  *  respecting a custom OpenRouter proxy/base URL if they have one configured
- *  — with only `id`/`name`/pricing/`contextWindow` swapped to Jev's. Returns
- *  `undefined` if the user has no OpenRouter-routed model to clone from
- *  (i.e. no OpenRouter credential), which is the only real prerequisite. */
+ *  — with only `id`/`requestModelId`/`name`/pricing/`contextWindow` swapped
+ *  to Jev's. Returns `undefined` if the user has no OpenRouter-routed model
+ *  to clone from (i.e. no OpenRouter credential), which is the only real
+ *  prerequisite. */
 function resolveJevModel(ctx: ExtensionContext, spec: string): Model | undefined {
-  const match = /typesafe\/(jev(?:-[\w.]+)?)$/.exec(spec);
+  const match = /typesafe\/(jev-[\w.]+)$/.exec(spec);
   if (!match) return undefined;
   const jevId = `typesafe/${match[1]}`;
 
@@ -381,10 +384,19 @@ function resolveJevModel(ctx: ExtensionContext, spec: string): Model | undefined
     ?.find((m) => (m as Model).provider === "openrouter") as Model | undefined;
   if (!template) return undefined;
 
+  // The bare `typesafe/jev-latest` id 400s on the decisions endpoint
+  // ("Model typesafe/jev-latest does not exist") — verified live. The
+  // `~`-prefixed alias form (`~typesafe/jev-latest`) resolves correctly to
+  // whatever concrete version is current. Concrete versions (`jev-1.13`)
+  // work fine unprefixed and need no rewrite. `id` stays the clean spec the
+  // user typed/saved; `requestModelId` carries the working wire form,
+  // exactly the split the `Model` type documents this field for.
+  const wireId = jevId.endsWith("-latest") ? `~${jevId}` : undefined;
+
   return {
     ...template,
     id: jevId,
-    requestModelId: undefined,
+    requestModelId: wireId,
     name: "TypeSafe: Jev",
     reasoning: false,
     input: ["text"],
