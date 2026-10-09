@@ -467,6 +467,24 @@ describe("tier 3 — Jev decisions endpoint", () => {
     expect(fetchCalls.length).toBe(0);
   });
 
+  it("resolver settling to { apiKey, credentialId } (newer omp builds) is unwrapped correctly", async () => {
+    // Regression: omp's modelRegistry.resolver() used to settle to a bare
+    // bearer string; some omp builds settle to `{ apiKey, credentialId }`
+    // instead. Interpolating that object directly into the Authorization
+    // header serializes to the literal text "[object Object]", which
+    // OpenRouter's decisions endpoint rejects as 401 Missing Authentication
+    // header — verified live. The gate must unwrap `.apiKey` from either shape.
+    const { handlers } = await loadPlugin("typesafe/jev-1.13");
+    const { ctx } = jevCtx();
+    // makeCtx types the mock resolver as returning a bare string; the point of
+    // this test is the newer object-returning shape, so cast through unknown.
+    ctx.modelRegistry.resolver = (() => () =>
+      Promise.resolve({ apiKey: "sk-or-v1-fromobject", credentialId: 1 })) as unknown as typeof ctx.modelRegistry.resolver;
+    await handlers.tool_call(bash("npm install"), ctx);
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].init.headers.Authorization).toBe("Bearer sk-or-v1-fromobject");
+  });
+
   it("jev-latest is sent on the wire as ~typesafe/jev-latest (bare id 400s on the real API)", async () => {
     const { handlers } = await loadPlugin("typesafe/jev-latest");
     const { ctx } = jevCtx();

@@ -432,8 +432,15 @@ async function classifyWithJev(
   signal: AbortSignal,
 ): Promise<ClassifierResult> {
   const apiKeyResolver = ctx.modelRegistry.resolver(model);
-  const apiKey =
+  const resolved =
     typeof apiKeyResolver === "string" ? apiKeyResolver : await apiKeyResolver({ error: undefined, lastChance: false });
+  // omp's resolver used to settle to a bare bearer string; newer omp builds
+  // settle to `{ apiKey, credentialId }` instead (verified live against
+  // omp 18.8.7 — a bare string result would otherwise serialize into this
+  // request's `Authorization` header as the literal text "[object Object]",
+  // which OpenRouter rejects as `401 Missing Authentication header`).
+  // Accept either shape so this keeps working across omp versions.
+  const apiKey = typeof resolved === "string" ? resolved : (resolved as { apiKey?: string } | undefined)?.apiKey;
   if (!apiKey) {
     logger.warn?.("bash-gate: no API key resolved for Jev model — run /bash-gate");
     return null;
